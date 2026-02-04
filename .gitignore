@@ -1,0 +1,96 @@
+# ─────────────────────────────────────────────
+# ENVIRONMENT VARIABLES
+# ─────────────────────────────────────────────
+.env
+.env.development
+.env.production
+.env.local
+
+# ─────────────────────────────────────────────
+# DEPENDENCIES
+# ─────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─────────────────────────────────────────────
+# LOG FILES
+# ─────────────────────────────────────────────
+logs/
+*.log
+log.txt
+debug.log
+stdout.log
+stderr.log
+
+# ─────────────────────────────────────────────
+# OS GENERATED FILES
+# ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─────────────────────────────────────────────
+# EDITORS
+# ─────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ─────────────────────────────────────────────
+# BUILD & CACHE
+# ─────────────────────────────────────────────
+dist/
+build/
+.cache/
+.temp/
+.tmp/
+coverage/
+
+# ─────────────────────────────────────────────
+# MONGO / DATABASE
+# ─────────────────────────────────────────────
+*.pid
+mongod.lock
+data/db/
+dump/
+
+# ─────────────────────────────────────────────
+# UPLOADS / USER FILES
+# ─────────────────────────────────────────────
+uploads/
+public/uploads/
+temp/
+tmp/
+
+# ─────────────────────────────────────────────
+# EXPO / REACT-NATIVE (if included)
+# ─────────────────────────────────────────────
+.expo/
+.expo-shared/
+android/
+ios/
+web-build/
+*.jks
+
+# Metro bundler cache
+.expo/packager-info.json
+.expo/manifest.json
+.expo/files/
+.expo/*.db
+
+# ─────────────────────────────────────────────
+# MISC
+# ─────────────────────────────────────────────
+*.bak
+*.swp
+*.swo
+*.orig
+
+# Ignore environment-specific config
+config/*.local.js
+
+# Ignore generated assets
+*.png~
+*.jpg~
