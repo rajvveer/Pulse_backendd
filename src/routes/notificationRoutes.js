@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const notificationController = require('../controllers/notificationController');
-const { authenticateToken } = require('../middlewares/auth');
+const { verifyAccessToken } = require('../middlewares/auth');
 
 // All routes require authentication
-router.use(authenticateToken);
+router.use(verifyAccessToken);
 
 // GET /api/v1/notifications - Get all notifications (with optional filters)
 router.get('/', notificationController.getNotifications);
