@@ -252,12 +252,32 @@ exports.updateProfile = async (req, res) => {
     const updates = {};
     // Only allow specific fields to be updated directly
     const allowedFields = [
+      // Profile fields
       'profile.displayName',
       'profile.bio',
       'profile.location',
       'profile.website',
       'profile.avatar',
-      'avatar' // Added root level field to allowed updates
+      'avatar',
+      // Settings fields
+      'settings.pushNotifications',
+      'settings.emailNotifications',
+      'settings.notifyOnLike',
+      'settings.notifyOnComment',
+      'settings.notifyOnFollow',
+      'settings.notifyOnMention',
+      'settings.theme',
+      'settings.radius',
+      'settings.shareExactLocation',
+      'settings.anonymousPosting',
+      // Privacy fields
+      'privacy.isPrivate',
+      'privacy.showOnlineStatus',
+      'privacy.allowMessages',
+      'privacy.showEmail',
+      'privacy.showPhone',
+      'privacy.showLocation',
+      'privacy.allowTagging',
     ];
 
     Object.keys(req.body).forEach(key => {
@@ -270,6 +290,10 @@ exports.updateProfile = async (req, res) => {
         if (key === 'avatar') updates['profile.avatar'] = req.body[key];
       }
     });
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid fields to update' });
+    }
 
     const user = await User.findByIdAndUpdate(
       req.user.userId,
