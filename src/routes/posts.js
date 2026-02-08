@@ -6,7 +6,13 @@ const postController = require('../controllers/postController');
 // Create post
 router.post('/', verifyAccessToken, postController.createPost);
 
-// Get single post
+// Search posts
+router.get('/search', verifyAccessToken, postController.searchPosts);
+
+// Get trending hashtags
+router.get('/trending', verifyAccessToken, postController.getTrendingHashtags);
+
+// Get single post (must be after /search and /trending to avoid conflict)
 router.get('/:postId', verifyAccessToken, postController.getPost);
 
 // Update post

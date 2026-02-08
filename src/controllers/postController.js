@@ -405,3 +405,72 @@ exports.updatePost = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// ==========================================
+// SEARCH POSTS
+// ==========================================
+exports.searchPosts = async (req, res) => {
+  try {
+    const { q, page = 1, limit = 20 } = req.query;
+
+    if (!q || q.trim().length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const searchQuery = q.trim();
+
+    // Search by text content or hashtags
+    const posts = await Post.find({
+      isActive: true,
+      isAnonymous: false,
+      visibility: 'public',
+      $or: [
+        { 'content.text': { $regex: searchQuery, $options: 'i' } },
+        { 'content.hashtags': { $regex: searchQuery.replace('#', ''), $options: 'i' } }
+      ]
+    })
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip((parseInt(page) - 1) * parseInt(limit))
+      .populate('author', 'username name avatar profile isVerified')
+      .lean();
+
+    res.json({
+      success: true,
+      data: posts,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        hasMore: posts.length === parseInt(limit)
+      }
+    });
+  } catch (error) {
+    console.error('Search posts error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ==========================================
+// GET TRENDING HASHTAGS
+// ==========================================
+exports.getTrendingHashtags = async (req, res) => {
+  try {
+    const timeAgo = new Date(Date.now() - 24 * 60 * 60 * 1000); // Last 24 hours
+
+    const trending = await Post.aggregate([
+      { $match: { isActive: true, visibility: 'public', createdAt: { $gte: timeAgo } } },
+      { $unwind: '$content.hashtags' },
+      { $group: { _id: '$content.hashtags', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 }
+    ]);
+
+    res.json({
+      success: true,
+      data: trending.map(t => ({ tag: t._id, count: t.count }))
+    });
+  } catch (error) {
+    console.error('Get trending error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
