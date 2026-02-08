@@ -31,9 +31,9 @@ exports.searchUsers = async (req, res) => {
       ],
       _id: { $ne: req.user.userId } // Exclude current user
     })
-    .select('username profile.displayName profile.avatar avatar isVerified')
-    .limit(20)
-    .lean();
+      .select('username profile.displayName profile.avatar avatar isVerified')
+      .limit(20)
+      .lean();
 
     res.json({ success: true, data: users });
   } catch (error) {
@@ -142,15 +142,30 @@ exports.getUserPosts = async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const { username } = req.params;
+    const currentUserId = req.user?.userId; // Current logged-in user
+
     const user = await User.findOne({ username });
 
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const posts = await Post.find({ author: user._id })
-      // ✅ FIXED: Added 'avatar' specifically to the populate string
-      .populate('author', 'username name avatar profile') 
+    // Check if viewing own profile or someone else's
+    const isOwnProfile = currentUserId && user._id.toString() === currentUserId.toString();
+
+    // Build query - hide anonymous posts from other users
+    const query = {
+      author: user._id,
+      isActive: true  // ✅ Filter out deleted posts
+    };
+
+    // Only hide anonymous posts when viewing OTHER users' profiles
+    if (!isOwnProfile) {
+      query.isAnonymous = false; // ✅ Hide anonymous posts from other users
+    }
+
+    const posts = await Post.find(query)
+      .populate('author', 'username name avatar profile')
       .sort({ createdAt: -1 }); // Newest first
 
     res.json({
@@ -184,13 +199,13 @@ exports.toggleFollow = async (req, res) => {
     if (isFollowing) {
       // === UNFOLLOW ===
       // 1. Remove ID from Followers Array AND Decrement Count
-      await User.findByIdAndUpdate(targetUser._id, { 
+      await User.findByIdAndUpdate(targetUser._id, {
         $pull: { followers: currentUserId },
-        $inc: { 'stats.followers': -1 } 
+        $inc: { 'stats.followers': -1 }
       });
 
       // 2. Remove ID from Following Array AND Decrement Count
-      await User.findByIdAndUpdate(currentUserId, { 
+      await User.findByIdAndUpdate(currentUserId, {
         $pull: { following: targetUser._id },
         $inc: { 'stats.following': -1 }
       });
@@ -198,13 +213,13 @@ exports.toggleFollow = async (req, res) => {
     } else {
       // === FOLLOW ===
       // 1. Add ID to Followers Array AND Increment Count
-      await User.findByIdAndUpdate(targetUser._id, { 
+      await User.findByIdAndUpdate(targetUser._id, {
         $addToSet: { followers: currentUserId },
         $inc: { 'stats.followers': 1 }
       });
 
       // 2. Add ID to Following Array AND Increment Count
-      await User.findByIdAndUpdate(currentUserId, { 
+      await User.findByIdAndUpdate(currentUserId, {
         $addToSet: { following: targetUser._id },
         $inc: { 'stats.following': 1 }
       });
@@ -228,10 +243,10 @@ exports.updateProfile = async (req, res) => {
     const updates = {};
     // Only allow specific fields to be updated directly
     const allowedFields = [
-      'profile.displayName', 
-      'profile.bio', 
-      'profile.location', 
-      'profile.website', 
+      'profile.displayName',
+      'profile.bio',
+      'profile.location',
+      'profile.website',
       'profile.avatar',
       'avatar' // Added root level field to allowed updates
     ];
@@ -239,7 +254,7 @@ exports.updateProfile = async (req, res) => {
     Object.keys(req.body).forEach(key => {
       if (allowedFields.includes(key)) {
         updates[key] = req.body[key];
-        
+
         // ✅ AUTO-SYNC: If profile.avatar is updated, sync it to root avatar
         if (key === 'profile.avatar') updates['avatar'] = req.body[key];
         // ✅ AUTO-SYNC: If root avatar is updated, sync it to profile.avatar
@@ -281,7 +296,7 @@ exports.uploadAvatar = async (req, res) => {
 
         const user = await User.findByIdAndUpdate(
           req.user.userId,
-          { 
+          {
             'profile.avatar': result.secure_url, // Update profile field
             avatar: result.secure_url            // Update root field (legacy support)
           },
@@ -299,7 +314,7 @@ exports.uploadAvatar = async (req, res) => {
     console.error('Upload Error:', error);
     res.status(500).json({ success: false, message: 'Upload failed' });
   }
-};  
+};
 
 // ==========================================
 // 7. GET FOLLOWERS LIST

@@ -24,13 +24,26 @@ config.printSummary();
 // Create HTTP server
 const server = createServer(app);
 
-// Initialize Socket.IO
+// Initialize Socket.IO with production-ready settings
 const io = new Server(server, {
   cors: {
-    origin: config.get('cors.origin'),
+    origin: config.get('cors.origin') || '*', // Allow all origins for mobile apps
     methods: ["GET", "POST"],
     credentials: config.get('cors.credentials')
-  }
+  },
+  // ✅ PING/PONG SETTINGS - Must match frontend for mobile reliability
+  pingTimeout: 30000,     // 30 seconds - match frontend
+  pingInterval: 25000,    // 25 seconds - match frontend
+
+  // ✅ TRANSPORT SETTINGS - Allow polling for mobile networks
+  transports: ['polling', 'websocket'],
+  allowUpgrades: true,
+
+  // ✅ CONNECTION SETTINGS
+  connectTimeout: 60000,  // 60 second connection timeout
+
+  // ✅ BUFFER SETTINGS
+  maxHttpBufferSize: 1e6, // 1MB max message size
 });
 
 // ✅ ADDED: Socket Authentication Middleware
@@ -90,7 +103,7 @@ async function initialize() {
 
   } catch (error) {
     console.error('❌ Service initialization failed:', error);
-    
+
     if (config.isProduction()) {
       console.error('🚨 Exiting due to initialization failure in production');
       process.exit(1);
@@ -103,7 +116,7 @@ async function initialize() {
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log(`👤 User connected: ${socket.id} ${socket.userId ? `(ID: ${socket.userId})` : ''}`);
-  
+
   // ✅ ADDED: Attach the Real-Time Chat Logic here
   // This enables join_conversation, send_message, typing_start, etc.
   realtimeHandler(io, socket);
@@ -150,8 +163,8 @@ app.set('socketio', io);
 
 // Enhanced health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     timestamp: new Date().toISOString(),
     service: 'Pulse Backend API',
     version: '1.0.0',
@@ -163,7 +176,7 @@ app.get('/health', (req, res) => {
 app.get('/health/detailed', async (req, res) => {
   try {
     const startTime = Date.now();
-    
+
     // Test all services
     const [databaseHealth, redisHealth] = await Promise.allSettled([
       databaseConfig.isHealthy(),
@@ -174,7 +187,7 @@ app.get('/health/detailed', async (req, res) => {
       status: 'OK',
       timestamp: new Date().toISOString(),
       responseTime: `${Date.now() - startTime}ms`,
-      
+
       // Service health checks
       services: {
         database: databaseHealth.status === 'fulfilled' ? databaseHealth.value : false,
@@ -182,7 +195,7 @@ app.get('/health/detailed', async (req, res) => {
         firebase: firebaseConfig.isAvailable(),
         smtp: smtpConfig.isAvailable()
       },
-      
+
       // Application info
       application: {
         name: 'Pulse Backend API',
@@ -192,7 +205,7 @@ app.get('/health/detailed', async (req, res) => {
         uptime: Math.floor(process.uptime()),
         startTime: new Date(Date.now() - process.uptime() * 1000).toISOString()
       },
-      
+
       // System info
       system: {
         platform: process.platform,
@@ -206,13 +219,13 @@ app.get('/health/detailed', async (req, res) => {
           usage: process.cpuUsage()
         }
       },
-      
+
       // Database info (if connected)
       database: databaseConfig.getConnectionStats(),
-      
+
       // Redis info (if connected)  
-      redis: redisHealth.status === 'fulfilled' && redisHealth.value ? 
-        await cacheService.getStats().catch(() => ({ error: 'Stats unavailable' })) : 
+      redis: redisHealth.status === 'fulfilled' && redisHealth.value ?
+        await cacheService.getStats().catch(() => ({ error: 'Stats unavailable' })) :
         { connected: false },
 
       // Socket.io info
@@ -241,9 +254,9 @@ app.get('/health/detailed', async (req, res) => {
     const criticalServices = [health.services.database, health.services.redis];
     const allCriticalHealthy = criticalServices.every(status => status === true);
     const overallStatus = allCriticalHealthy ? 'OK' : 'DEGRADED';
-    
+
     health.status = overallStatus;
-    
+
     res.status(allCriticalHealthy ? 200 : 503).json(health);
 
   } catch (error) {
@@ -313,24 +326,24 @@ async function startServer() {
 // Graceful shutdown handlers
 process.on('SIGTERM', async () => {
   console.log('\n🛑 SIGTERM received. Shutting down gracefully...');
-  
+
   server.close(async () => {
     console.log('🔌 HTTP server closed');
-    
+
     // Close Socket.IO
     io.close(() => {
       console.log('📡 Socket.IO server closed');
     });
-    
+
     // Close database connection
     await databaseConfig.disconnect();
-    
+
     // Close Redis connection
     await cacheService.disconnect();
-    
+
     // Close SMTP connection
     await smtpConfig.close();
-    
+
     console.log('👋 Graceful shutdown completed');
     process.exit(0);
   });
@@ -344,24 +357,24 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
   console.log('\n🛑 SIGINT received. Shutting down gracefully...');
-  
+
   server.close(async () => {
     console.log('🔌 HTTP server closed');
-    
+
     // Close Socket.IO
     io.close(() => {
       console.log('📡 Socket.IO server closed');
     });
-    
+
     // Close database connection
     await databaseConfig.disconnect();
-    
+
     // Close Redis connection
     await cacheService.disconnect();
-    
+
     // Close SMTP connection  
     await smtpConfig.close();
-    
+
     console.log('👋 Graceful shutdown completed');
     process.exit(0);
   });
@@ -376,7 +389,7 @@ process.on('SIGINT', async () => {
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
   console.error('💥 Uncaught Exception:', error);
-  
+
   if (config.isProduction()) {
     console.error('🚨 Exiting due to uncaught exception in production');
     process.exit(1);
@@ -386,7 +399,7 @@ process.on('uncaughtException', (error) => {
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
   console.error('🚫 Unhandled Rejection at:', promise, 'reason:', reason);
-  
+
   if (config.isProduction()) {
     console.error('🚨 Exiting due to unhandled rejection in production');
     process.exit(1);

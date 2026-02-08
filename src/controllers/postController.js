@@ -99,21 +99,31 @@ exports.getUserPosts = async (req, res) => {
   try {
     const { username } = req.params;
     const { page = 1, limit = 20 } = req.query;
+    const currentUserId = req.user?.userId;
 
     const user = await User.findOne({ username });
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const posts = await Post.find({
+    // Check if viewing own profile
+    const isOwnProfile = currentUserId && user._id.toString() === currentUserId.toString();
+
+    // Build query
+    const query = {
       author: user._id,
-      isActive: true,
-      isAnonymous: false
-    })
+      isActive: true
+    };
+
+    // ✅ FIX: Only hide anonymous posts from OTHER users, owner can see their own
+    if (!isOwnProfile) {
+      query.isAnonymous = false;
+    }
+
+    const posts = await Post.find(query)
       .sort({ isPinned: -1, createdAt: -1 })
       .limit(parseInt(limit))
       .skip((parseInt(page) - 1) * parseInt(limit))
-      // ✅ FIX: Added 'profile'
       .populate('author', 'username name avatar profile isVerified');
 
     res.json({
@@ -136,15 +146,15 @@ exports.getMyPosts = async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
 
+    // ✅ FIX: Owner can see ALL their posts including anonymous ones
     const posts = await Post.find({
       author: req.user.userId,
-      isActive: true,
-      isAnonymous: false
+      isActive: true
+      // Removed isAnonymous: false - owner should see their own anonymous posts
     })
       .sort({ isPinned: -1, createdAt: -1 })
       .limit(parseInt(limit))
       .skip((parseInt(page) - 1) * parseInt(limit))
-      // ✅ FIX: Added 'profile'
       .populate('author', 'username name avatar profile isVerified');
 
     res.json({
