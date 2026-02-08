@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const Post = require('../models/Post'); // Ensure you have this model
+const Notification = require('../models/Notification');
 const cloudinary = require('cloudinary').v2;
 const config = require('../config');
 
@@ -223,6 +224,14 @@ exports.toggleFollow = async (req, res) => {
         $addToSet: { following: targetUser._id },
         $inc: { 'stats.following': 1 }
       });
+
+      // 3. Create follow notification
+      Notification.createNotification({
+        recipient: targetUser._id,
+        sender: currentUserId,
+        type: 'follow',
+        message: 'started following you'
+      }).catch(err => console.error('Notification error:', err));
     }
 
     res.json({

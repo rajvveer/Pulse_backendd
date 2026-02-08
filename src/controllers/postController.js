@@ -4,6 +4,7 @@ const Comment = require('../models/Comment');
 const Like = require('../models/Like');
 const UserBehavior = require('../models/UserBehavior');
 const UserEngagement = require('../models/UserEngagement');
+const Notification = require('../models/Notification');
 
 // Helper function to mask anonymous posts
 const maskAnonymousPost = (post) => {
@@ -195,6 +196,15 @@ exports.toggleLike = async (req, res) => {
       const authorId = (post.author._id || post.author).toString();
       UserBehavior.recordLike(userId, post).catch(() => { });
       UserEngagement.recordSignal(userId, authorId, 'likes', 1).catch(() => { });
+
+      // Create notification for post author
+      Notification.createNotification({
+        recipient: authorId,
+        sender: userId,
+        type: 'like',
+        post: postId,
+        message: 'liked your post'
+      }).catch(err => console.error('Notification error:', err));
     }
 
     res.json({
@@ -255,6 +265,19 @@ exports.addComment = async (req, res) => {
     const populatedComment = await Comment.findById(comment._id)
       .populate('author', 'username name avatar profile isVerified')
       .lean();
+
+    // Create notification for post author (if not self-comment)
+    const authorId = (post.author._id || post.author).toString();
+    if (authorId !== req.user.userId) {
+      Notification.createNotification({
+        recipient: authorId,
+        sender: req.user.userId,
+        type: 'comment',
+        post: postId,
+        comment: comment._id,
+        message: 'commented on your post'
+      }).catch(err => console.error('Notification error:', err));
+    }
 
     res.status(201).json({
       success: true,

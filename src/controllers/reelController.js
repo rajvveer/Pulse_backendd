@@ -5,6 +5,7 @@ const User = require('../models/User');
 const UserEngagement = require('../models/UserEngagement');
 const ReelAlgo = require('../Algorithms/ReelAlgo');
 const CommentsAlgo = require('../Algorithms/CommentsAlgo');
+const Notification = require('../models/Notification');
 const cloudinary = require('cloudinary').v2;
 const { Readable } = require('stream');
 const config = require('../config');
@@ -250,6 +251,15 @@ exports.toggleLike = async (req, res) => {
     const authorId = reel.user;
     if (liked && authorId) {
       await UserEngagement.recordSignal(userId, authorId, 'likes', 1);
+
+      // Create notification for reel author
+      Notification.createNotification({
+        recipient: authorId,
+        sender: userId,
+        type: 'reel_like',
+        reel: reelId,
+        message: 'liked your reel'
+      }).catch(err => console.error('Notification error:', err));
     }
 
     res.status(200).json({
