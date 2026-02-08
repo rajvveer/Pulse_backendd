@@ -99,6 +99,11 @@ exports.createReel = async (req, res) => {
 //  2. GET REELS FEED - RANKED (Instagram/X Style)
 // =========================================================
 exports.getReelsFeed = async (req, res) => {
+  // ✅ Prevent caching to always get fresh like counts
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
   console.log('\n🎬 [getReelsFeed] Starting...');
   try {
     const page = parseInt(req.query.page) || 1;

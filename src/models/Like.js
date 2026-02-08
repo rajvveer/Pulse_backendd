@@ -128,18 +128,30 @@ likeSchema.statics.getLikeVelocity = async function (targetType, targetId, hours
  * Batch get like counts - optimized for feeds
  */
 likeSchema.statics.getBatchLikeCounts = async function (targetType, targetIds) {
+    // Convert all IDs to ObjectId for consistent matching
+    const objectIds = targetIds.map(id => {
+        try {
+            return new mongoose.Types.ObjectId(id.toString());
+        } catch (e) {
+            return id;
+        }
+    });
+
     const pipeline = [
-        { $match: { targetType, targetId: { $in: targetIds.map(id => new mongoose.Types.ObjectId(id)) } } },
+        { $match: { targetType, targetId: { $in: objectIds } } },
         { $group: { _id: '$targetId', count: { $sum: 1 } } }
     ];
 
     const results = await this.aggregate(pipeline);
     const countMap = new Map();
+
+    // Map results with string keys for consistency
     results.forEach(r => countMap.set(r._id.toString(), r.count));
 
     // Fill in zeros for items with no likes
     targetIds.forEach(id => {
-        if (!countMap.has(id.toString())) countMap.set(id.toString(), 0);
+        const key = id.toString();
+        if (!countMap.has(key)) countMap.set(key, 0);
     });
 
     return countMap;
