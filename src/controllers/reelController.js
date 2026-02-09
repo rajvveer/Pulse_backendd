@@ -413,6 +413,14 @@ exports.getComments = async (req, res) => {
       _score: undefined
     }));
 
+    // 🔍 DEBUG: Log avatar data for first few comments
+    if (processedComments.length > 0) {
+      console.log('📸 [getComments] Sample comment avatars:');
+      processedComments.slice(0, 3).forEach((c, idx) => {
+        console.log(`  Comment ${idx + 1}: author=${c.author?.username}, avatar=${c.author?.avatar?.substring(0, 50)}...`);
+      });
+    }
+
     res.status(200).json({ success: true, data: processedComments });
 
   } catch (error) {
