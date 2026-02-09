@@ -27,11 +27,25 @@ const getOptimizedVideoUrl = (url) => {
 const normalizeUser = (user) => {
   if (!user) return null;
 
-  const cleanAvatarUrl =
-    user.profile?.avatar ||
-    (user.authMethods && user.authMethods.length > 0 ? user.authMethods[0].profile?.avatar : null) ||
-    user.avatar ||
-    null;
+  // Extract avatar from all possible locations
+  let cleanAvatarUrl = null;
+
+  // Check profile.avatar first (main location)
+  if (user.profile && user.profile.avatar) {
+    cleanAvatarUrl = user.profile.avatar;
+  }
+  // Check authMethods for OAuth avatars
+  else if (user.authMethods && user.authMethods.length > 0 && user.authMethods[0].profile?.avatar) {
+    cleanAvatarUrl = user.authMethods[0].profile.avatar;
+  }
+  // Check direct avatar field
+  else if (user.avatar) {
+    cleanAvatarUrl = user.avatar;
+  }
+  // Default fallback
+  else {
+    cleanAvatarUrl = 'https://res.cloudinary.com/pulse/image/upload/v1/defaults/avatar.png';
+  }
 
   return {
     _id: user._id,
