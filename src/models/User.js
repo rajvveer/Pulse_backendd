@@ -149,7 +149,7 @@ const userSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }],
-  
+
   // ===== LOCATION DATA (EXISTING - ENHANCED) =====
   lastLocation: {
     type: {
@@ -221,7 +221,7 @@ const userSchema = new mongoose.Schema({
       type: Boolean,
       default: false
     },
-    
+
     // Notification settings
     pushNotifications: {
       type: Boolean,
@@ -247,7 +247,7 @@ const userSchema = new mongoose.Schema({
       type: Boolean,
       default: true
     },
-    
+
     // App settings
     theme: {
       type: String,
@@ -281,6 +281,27 @@ const userSchema = new mongoose.Schema({
       enum: ['verified', 'early-adopter', 'contributor', 'moderator'],
     },
     earnedAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
+
+  // ===== PUSH NOTIFICATION TOKENS =====
+  fcmTokens: [{
+    token: {
+      type: String,
+      required: true
+    },
+    deviceId: {
+      type: String,
+      required: true
+    },
+    platform: {
+      type: String,
+      enum: ['android', 'ios'],
+      default: 'android'
+    },
+    lastUsed: {
       type: Date,
       default: Date.now
     }
@@ -321,15 +342,15 @@ userSchema.index({ lastActive: -1 });
 userSchema.index({ createdAt: -1 });
 
 // ===== VIRTUAL FIELDS =====
-userSchema.virtual('followerCount').get(function() {
+userSchema.virtual('followerCount').get(function () {
   return this.followers?.length || this.stats.followers || 0;
 });
 
-userSchema.virtual('followingCount').get(function() {
+userSchema.virtual('followingCount').get(function () {
   return this.following?.length || this.stats.following || 0;
 });
 
-userSchema.virtual('age').get(function() {
+userSchema.virtual('age').get(function () {
   if (!this.profile.dateOfBirth) return null;
   const today = new Date();
   const birthDate = new Date(this.profile.dateOfBirth);
@@ -342,11 +363,11 @@ userSchema.virtual('age').get(function() {
 });
 
 // ===== INSTANCE METHODS (EXISTING) =====
-userSchema.methods.isAccountLocked = function() {
+userSchema.methods.isAccountLocked = function () {
   return !!(this.lockUntil && this.lockUntil > Date.now());
 };
 
-userSchema.methods.incrementLoginAttempts = function() {
+userSchema.methods.incrementLoginAttempts = function () {
   if (this.lockUntil && this.lockUntil < Date.now()) {
     return this.updateOne({
       $unset: { lockUntil: 1 },
@@ -355,7 +376,7 @@ userSchema.methods.incrementLoginAttempts = function() {
   }
 
   const updates = { $inc: { loginAttempts: 1 } };
-  
+
   if (this.loginAttempts + 1 >= 5 && !this.isAccountLocked()) {
     updates.$set = { lockUntil: Date.now() + (2 * 60 * 60 * 1000) }; // 2 hours
   }
@@ -363,19 +384,19 @@ userSchema.methods.incrementLoginAttempts = function() {
   return this.updateOne(updates);
 };
 
-userSchema.methods.resetLoginAttempts = function() {
+userSchema.methods.resetLoginAttempts = function () {
   return this.updateOne({
     $unset: { loginAttempts: 1, lockUntil: 1 }
   });
 };
 
 // ===== NEW PROFILE METHODS =====
-userSchema.methods.updateLastActive = function() {
+userSchema.methods.updateLastActive = function () {
   this.lastActive = new Date();
   return this.save();
 };
 
-userSchema.methods.setOnlineStatus = function(isOnline) {
+userSchema.methods.setOnlineStatus = function (isOnline) {
   this.isOnline = isOnline;
   if (isOnline) {
     this.lastActive = new Date();
@@ -383,33 +404,33 @@ userSchema.methods.setOnlineStatus = function(isOnline) {
   return this.save();
 };
 
-userSchema.methods.canViewProfile = function(viewerId) {
+userSchema.methods.canViewProfile = function (viewerId) {
   // If profile is public, anyone can view
   if (!this.privacy.isPrivate) return true;
-  
+
   // Own profile is always visible
   if (this._id.toString() === viewerId.toString()) return true;
-  
+
   // Check if viewer is a follower
   return this.followers.some(id => id.toString() === viewerId.toString());
 };
 
-userSchema.methods.isFollowing = function(userId) {
+userSchema.methods.isFollowing = function (userId) {
   return this.following.some(id => id.toString() === userId.toString());
 };
 
-userSchema.methods.isFollower = function(userId) {
+userSchema.methods.isFollower = function (userId) {
   return this.followers.some(id => id.toString() === userId.toString());
 };
 
-userSchema.methods.isBlocked = function(userId) {
+userSchema.methods.isBlocked = function (userId) {
   return this.blockedUsers.some(id => id.toString() === userId.toString());
 };
 
 // ===== STATIC METHODS (EXISTING + ENHANCED) =====
-userSchema.statics.findByAuthMethod = function(type, identifier) {
+userSchema.statics.findByAuthMethod = function (type, identifier) {
   let query;
-  
+
   if (type === 'email') {
     query = {
       $or: [
@@ -426,7 +447,7 @@ userSchema.statics.findByAuthMethod = function(type, identifier) {
       `+${cleanPhone}`,
       cleanPhone.startsWith('91') ? cleanPhone.substring(2) : `91${cleanPhone}`
     ];
-    
+
     query = {
       $or: [
         { phone: { $in: formats } },
@@ -441,11 +462,11 @@ userSchema.statics.findByAuthMethod = function(type, identifier) {
       isActive: true
     };
   }
-  
+
   return this.findOne(query);
 };
 
-userSchema.statics.findByCredentials = function(identifier, password) {
+userSchema.statics.findByCredentials = function (identifier, password) {
   return this.findOne({
     $or: [
       { email: identifier },
@@ -457,7 +478,7 @@ userSchema.statics.findByCredentials = function(identifier, password) {
 };
 
 // ===== NEW STATIC METHODS FOR PROFILE =====
-userSchema.statics.searchUsers = function(searchTerm, limit = 20) {
+userSchema.statics.searchUsers = function (searchTerm, limit = 20) {
   return this.find({
     $or: [
       { username: new RegExp(searchTerm, 'i') },
@@ -465,31 +486,31 @@ userSchema.statics.searchUsers = function(searchTerm, limit = 20) {
     ],
     isActive: true
   })
-  .select('username profile.displayName profile.avatar profile.bio isVerified stats')
-  .limit(limit);
+    .select('username profile.displayName profile.avatar profile.bio isVerified stats')
+    .limit(limit);
 };
 
-userSchema.statics.getTrendingUsers = function(limit = 10) {
+userSchema.statics.getTrendingUsers = function (limit = 10) {
   return this.find({ isActive: true })
     .sort({ 'stats.followers': -1, lastActive: -1 })
     .select('username profile.displayName profile.avatar profile.bio isVerified stats')
     .limit(limit);
 };
 
-userSchema.statics.getSuggestedUsers = function(userId, limit = 10) {
+userSchema.statics.getSuggestedUsers = function (userId, limit = 10) {
   // Get users not followed by current user, sorted by popularity
   return this.find({
     _id: { $ne: userId },
     followers: { $ne: userId },
     isActive: true
   })
-  .sort({ 'stats.followers': -1 })
-  .select('username profile.displayName profile.avatar profile.bio isVerified stats')
-  .limit(limit);
+    .sort({ 'stats.followers': -1 })
+    .select('username profile.displayName profile.avatar profile.bio isVerified stats')
+    .limit(limit);
 };
 
 // ===== PRE-SAVE HOOKS =====
-userSchema.pre('save', function(next) {
+userSchema.pre('save', function (next) {
   // Sync stats with array lengths
   if (this.isModified('followers')) {
     this.stats.followers = this.followers.length;
@@ -497,19 +518,19 @@ userSchema.pre('save', function(next) {
   if (this.isModified('following')) {
     this.stats.following = this.following.length;
   }
-  
+
   // Set displayName to username if not set
   if (!this.profile.displayName && this.username) {
     this.profile.displayName = this.username;
   }
-  
+
   next();
 });
 
 // ===== TRANSFORM OUTPUT (HIDE SENSITIVE FIELDS) =====
 userSchema.set('toJSON', {
   virtuals: true,
-  transform: function(doc, ret) {
+  transform: function (doc, ret) {
     delete ret.passwordHash;
     delete ret.loginAttempts;
     delete ret.lockUntil;

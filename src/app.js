@@ -65,6 +65,7 @@ app.use('/api/v1/pulse-drops', require('./routes/pulseDropRoutes'));
 app.use('/api/v1/chains', require('./routes/chainRoutes'));
 app.use('/api/v1/alter-ego', require('./routes/alterEgoRoutes'));
 app.use('/api/v1/notifications', require('./routes/notificationRoutes'));
+app.use('/api/v1/push', require('./routes/pushRoutes'));
 
 
 // 404 handler

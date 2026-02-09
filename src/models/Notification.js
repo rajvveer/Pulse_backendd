@@ -147,7 +147,78 @@ notificationSchema.statics.createNotification = async function (data) {
         return recentDuplicate;
     }
 
-    return this.create(data);
+    // Create the notification
+    const notification = await this.create(data);
+
+    // Send push notification asynchronously (don't wait for it)
+    setImmediate(async () => {
+        try {
+            const pushService = require('../services/pushService');
+            const User = require('./User');
+
+            // Get sender info for notification message
+            const sender = await User.findById(data.sender)
+                .select('username profile.displayName')
+                .lean();
+
+            const senderName = sender?.profile?.displayName || sender?.username || 'Someone';
+
+            // Generate notification content based on type
+            let title = 'Pulse';
+            let body = data.message || 'You have a new notification';
+            let pushData = { type: data.type };
+
+            switch (data.type) {
+                case 'like':
+                    title = '❤️ New Like';
+                    body = `${senderName} liked your post`;
+                    pushData.postId = data.post?.toString();
+                    break;
+                case 'reel_like':
+                    title = '❤️ New Like';
+                    body = `${senderName} liked your reel`;
+                    pushData.reelId = data.reel?.toString();
+                    break;
+                case 'comment':
+                    title = '💬 New Comment';
+                    body = `${senderName} commented on your post`;
+                    pushData.postId = data.post?.toString();
+                    break;
+                case 'reel_comment':
+                    title = '💬 New Comment';
+                    body = `${senderName} commented on your reel`;
+                    pushData.reelId = data.reel?.toString();
+                    break;
+                case 'follow':
+                    title = '👤 New Follower';
+                    body = `${senderName} started following you`;
+                    pushData.username = sender?.username;
+                    break;
+                case 'chat':
+                    title = '💬 New Message';
+                    body = `${senderName} sent you a message`;
+                    pushData.conversationId = data.conversation?.toString();
+                    break;
+                case 'whisper':
+                    title = '🤫 New Whisper';
+                    body = `Someone sent you a whisper`;
+                    pushData.whisperId = data.whisper?.toString();
+                    break;
+                case 'mention':
+                    title = '📢 You were mentioned';
+                    body = `${senderName} mentioned you`;
+                    pushData.postId = data.post?.toString();
+                    break;
+            }
+
+            // Send push notification
+            await pushService.sendToUser(data.recipient.toString(), { title, body }, pushData);
+        } catch (error) {
+            console.error('Push notification error (non-blocking):', error.message);
+        }
+    });
+
+    return notification;
 };
 
 // Static: Delete old notifications (cleanup job)
