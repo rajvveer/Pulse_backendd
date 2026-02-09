@@ -379,13 +379,13 @@ exports.getComments = async (req, res) => {
       .sort({ createdAt: -1 })
       .populate({
         path: 'author',
-        select: 'username profile.avatar isVerified'
+        select: '+authMethods username profile avatar isVerified'
       })
       .populate({
         path: 'replies',
         populate: {
           path: 'author',
-          select: 'username profile.avatar isVerified'
+          select: '+authMethods username profile avatar isVerified'
         }
       })
       .lean({ virtuals: true });
