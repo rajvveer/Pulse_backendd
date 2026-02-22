@@ -8,6 +8,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "start:cluster": "node -r dotenv/config src/cluster.js",
     "dev": "nodemon --watch src --exec \"node -r dotenv/config src/server.js\"",
     "dev:worker": "nodemon --watch src src/jobs/worker.js",
     "test": "jest --watchAll",

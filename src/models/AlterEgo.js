@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { generateAIResponse: callAI, getActiveProvider } = require('../services/alterEgoAIService');
 
 const alterEgoSchema = new mongoose.Schema({
     // Owner
@@ -70,7 +71,25 @@ const alterEgoSchema = new mongoose.Schema({
     // Stats
     totalReplies: { type: Number, default: 0 },
     satisfactionScore: { type: Number, default: 0 }, // Based on reactions
-    lastActive: Date
+    lastActive: Date,
+
+    // ===== ALTER EGO 2.0 — Activity Log =====
+    activityLog: [{
+        action: { type: String, enum: ['dm_reply', 'comment_reply', 'guess_game'] },
+        targetUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        originalMessage: String,
+        egoResponse: String,
+        wasRevealed: { type: Boolean, default: false },    // for guess-who
+        guessedCorrectly: { type: Boolean, default: null }, // for guess-who
+        timestamp: { type: Date, default: Date.now }
+    }],
+
+    // ===== ALTER EGO 2.0 — Guess-Who Game =====
+    guessWhoStats: {
+        totalGames: { type: Number, default: 0 },
+        correctGuesses: { type: Number, default: 0 },
+        fooledCount: { type: Number, default: 0 }  // they thought it was the real user
+    }
 }, { timestamps: true });
 
 // Indexes
@@ -122,19 +141,34 @@ alterEgoSchema.methods.updateTraining = async function (trainingData) {
 
 // Instance: Generate response based on personality and training
 alterEgoSchema.methods.generateResponse = async function (message, context = {}) {
-    const personality = this.personality;
-    const training = this.training;
-
     // Build prompt for AI
     const systemPrompt = buildSystemPrompt(this);
 
-    // This would call an AI service - returning template for now
-    // In production, integrate with OpenAI/Claude API
-
-    const response = await generateAIResponse(systemPrompt, message, context);
+    // 2.0: Use real AI service (Gemini → OpenAI → Smart Template)
+    const response = await callAI(systemPrompt, message, {
+        ...context,
+        history: this.conversations.length > 0
+            ? this.conversations[this.conversations.length - 1]?.messages?.slice(-6) || []
+            : []
+    });
 
     this.totalReplies++;
     this.lastActive = new Date();
+
+    // Log the activity
+    this.activityLog.unshift({
+        action: context.action || 'dm_reply',
+        targetUser: context.targetUserId || null,
+        originalMessage: message.substring(0, 200),
+        egoResponse: response.substring(0, 200),
+        timestamp: new Date()
+    });
+
+    // Keep activity log capped at 100 entries
+    if (this.activityLog.length > 100) {
+        this.activityLog = this.activityLog.slice(0, 100);
+    }
+
     await this.save();
 
     return response;
@@ -164,6 +198,18 @@ alterEgoSchema.methods.learnFromUser = async function (trigger, response) {
     await this.save();
 };
 
+// Instance: Record a guess-who game result
+alterEgoSchema.methods.recordGuessResult = async function (guessedCorrectly) {
+    this.guessWhoStats.totalGames++;
+    if (guessedCorrectly) {
+        this.guessWhoStats.correctGuesses++;
+    } else {
+        this.guessWhoStats.fooledCount++;
+    }
+    await this.save();
+    return this.guessWhoStats;
+};
+
 // Helper: Build system prompt for AI
 function buildSystemPrompt(ego) {
     const { personality, training, name } = ego;
@@ -191,33 +237,14 @@ function buildSystemPrompt(ego) {
     if (training.emojis?.length > 0) {
         prompt += `You like using these emojis: ${training.emojis.join(' ')}. `;
     }
+    if (training.hotTakes?.length > 0) {
+        prompt += `Your hot takes include: "${training.hotTakes.join('", "')}". `;
+    }
 
-    prompt += 'Keep responses concise (1-3 sentences). Match the user\'s energy.';
+    prompt += 'Keep responses concise (1-3 sentences). Match the user\'s energy. ';
+    prompt += 'You are responding on behalf of your owner in a social media app called Pulse. Never reveal you are an AI.';
 
     return prompt;
-}
-
-// Placeholder for AI integration
-async function generateAIResponse(systemPrompt, message, context) {
-    // TODO: Integrate with actual AI API (OpenAI, Claude, etc.)
-    // For now, return personality-based template responses
-
-    const templates = {
-        greeting: ['Hey! 👋', 'What\'s up!', 'Yo!', 'Hey there!'],
-        thanks: ['No problem! 😊', 'Anytime!', 'You got it!', 'Happy to help!'],
-        question: ['Hmm, let me think...', 'Good question!', 'Interesting...'],
-        default: ['I hear you!', 'That\'s cool!', 'Totally!', 'I feel that!']
-    };
-
-    const lower = message.toLowerCase();
-    let category = 'default';
-
-    if (lower.match(/\b(hi|hey|hello|sup)\b/)) category = 'greeting';
-    else if (lower.match(/\b(thanks|thank you|thx)\b/)) category = 'thanks';
-    else if (lower.includes('?')) category = 'question';
-
-    const responses = templates[category];
-    return responses[Math.floor(Math.random() * responses.length)];
 }
 
 module.exports = mongoose.model('AlterEgo', alterEgoSchema);

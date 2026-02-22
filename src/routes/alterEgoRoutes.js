@@ -27,4 +27,14 @@ router.post('/generate', alterEgoController.generateResponse);
 // Learn from user
 router.post('/learn', alterEgoController.learn);
 
+// === ALTER EGO 2.0 ROUTES ===
+// Activity log
+router.get('/activity', alterEgoController.getActivityLog);
+
+// Guess-who game
+router.post('/guess', alterEgoController.recordGuess);
+
+// AI provider status
+router.get('/ai-status', alterEgoController.getAIStatus);
+
 module.exports = router;

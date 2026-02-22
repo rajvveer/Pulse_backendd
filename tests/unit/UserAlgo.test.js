@@ -1,8 +1,7 @@
 /**
- * UserAlgo.test.js - Unit tests for User Relevance Algorithm
+ * UserAlgo.test.js - Unit tests for User Relevance Algorithm v2.0
  */
 
-// Mock UserEngagement
 jest.mock('../../src/models/UserEngagement', () => ({
     getAffinity: jest.fn().mockResolvedValue(0),
     getBatchAffinities: jest.fn().mockResolvedValue(new Map())
@@ -14,248 +13,196 @@ describe('UserAlgo', () => {
 
     describe('calculateCreatorScore', () => {
         it('should return 0 for null user', () => {
-            const score = UserAlgo.calculateCreatorScore(null);
-            expect(score).toBe(0);
+            expect(UserAlgo.calculateCreatorScore(null)).toBe(0);
         });
 
         it('should return 0 for user with no stats', () => {
-            const user = {};
-            const score = UserAlgo.calculateCreatorScore(user);
-            expect(score).toBe(0);
+            expect(UserAlgo.calculateCreatorScore({})).toBe(0);
         });
 
         it('should give logarithmic boost for followers', () => {
-            const smallCreator = { stats: { followers: 100 } };
-            const mediumCreator = { stats: { followers: 10000 } };
-            const largeCreator = { stats: { followers: 1000000 } };
-
-            const smallScore = UserAlgo.calculateCreatorScore(smallCreator);
-            const mediumScore = UserAlgo.calculateCreatorScore(mediumCreator);
-            const largeScore = UserAlgo.calculateCreatorScore(largeCreator);
-
-            // Scores should increase but not linearly
-            expect(mediumScore).toBeGreaterThan(smallScore);
-            expect(largeScore).toBeGreaterThan(mediumScore);
-            expect(largeScore / smallScore).toBeLessThan(100); // Not 10000x difference
+            const small = UserAlgo.calculateCreatorScore({ stats: { followers: 100 } });
+            const medium = UserAlgo.calculateCreatorScore({ stats: { followers: 10000 } });
+            const large = UserAlgo.calculateCreatorScore({ stats: { followers: 1000000 } });
+            expect(medium).toBeGreaterThan(small);
+            expect(large).toBeGreaterThan(medium);
+            expect(large / small).toBeLessThan(100);
         });
 
         it('should boost verified creators', () => {
-            const unverified = { stats: { followers: 1000 }, isVerified: false };
-            const verified = { stats: { followers: 1000 }, isVerified: true };
-
-            const unverifiedScore = UserAlgo.calculateCreatorScore(unverified);
-            const verifiedScore = UserAlgo.calculateCreatorScore(verified);
-
-            expect(verifiedScore).toBeGreaterThan(unverifiedScore);
+            const u = { stats: { followers: 1000 }, isVerified: false };
+            const v = { stats: { followers: 1000 }, isVerified: true };
+            expect(UserAlgo.calculateCreatorScore(v)).toBeGreaterThan(UserAlgo.calculateCreatorScore(u));
         });
 
         it('should factor in content quality', () => {
-            const lowQuality = { stats: { posts: 100, totalLikes: 100 } }; // 1 like/post avg
-            const highQuality = { stats: { posts: 100, totalLikes: 10000 } }; // 100 likes/post avg
-
-            const lowScore = UserAlgo.calculateCreatorScore(lowQuality);
-            const highScore = UserAlgo.calculateCreatorScore(highQuality);
-
-            expect(highScore).toBeGreaterThan(lowScore);
+            const low = { stats: { posts: 100, totalLikes: 100 } };
+            const high = { stats: { posts: 100, totalLikes: 10000 } };
+            expect(UserAlgo.calculateCreatorScore(high)).toBeGreaterThan(UserAlgo.calculateCreatorScore(low));
         });
 
         it('should reward consistency', () => {
             const inconsistent = { stats: { postsPerWeek: 0 } };
             const consistent = { stats: { postsPerWeek: 5 } };
-
-            const inconsistentScore = UserAlgo.calculateCreatorScore(inconsistent);
-            const consistentScore = UserAlgo.calculateCreatorScore(consistent);
-
-            expect(consistentScore).toBeGreaterThan(inconsistentScore);
+            expect(UserAlgo.calculateCreatorScore(consistent)).toBeGreaterThan(UserAlgo.calculateCreatorScore(inconsistent));
         });
     });
 
     describe('calculateEngagementRate', () => {
         it('should return 0 for no followers', () => {
-            const user = { stats: { followers: 0 } };
-            const rate = UserAlgo.calculateEngagementRate(user);
-            expect(rate).toBe(0);
+            expect(UserAlgo.calculateEngagementRate({ stats: { followers: 0 } })).toBe(0);
         });
 
         it('should calculate rate based on recent engagement', () => {
-            const user = {
-                stats: {
-                    followers: 1000,
-                    recentLikes: 100,
-                    recentComments: 50,
-                    recentPosts: 10
-                }
-            };
+            const user = { stats: { followers: 1000, recentLikes: 100, recentComments: 50, recentPosts: 10 } };
+            expect(UserAlgo.calculateEngagementRate(user)).toBeGreaterThan(0);
+        });
+
+        it('should handle the fixed operator precedence correctly', () => {
+            const user = { stats: { followers: 1000, recentLikes: 0, recentComments: 10, recentPosts: 1 } };
             const rate = UserAlgo.calculateEngagementRate(user);
-            expect(rate).toBeGreaterThan(0);
+            // Comments should contribute: 10 * 2 = 20, / 1 post / 1000 followers = 0.02
+            expect(rate).toBe(0.02);
+        });
+    });
+
+    describe('isNicheCreator (v2.0)', () => {
+        it('should identify niche creators', () => {
+            const niche = { stats: { followers: 500, recentLikes: 100, recentComments: 50, recentPosts: 5 } };
+            expect(UserAlgo.isNicheCreator(niche)).toBe(true);
+        });
+
+        it('should not flag large creators as niche', () => {
+            const big = { stats: { followers: 100000, recentLikes: 100, recentComments: 50, recentPosts: 5 } };
+            expect(UserAlgo.isNicheCreator(big)).toBe(false);
         });
     });
 
     describe('calculateContentSimilarity', () => {
         it('should return 0 for users with no interests', () => {
-            const user1 = {};
-            const user2 = {};
-            const similarity = UserAlgo.calculateContentSimilarity(user1, user2);
-            expect(similarity).toBe(0);
+            expect(UserAlgo.calculateContentSimilarity({}, {})).toBe(0);
         });
 
         it('should return 1 for identical interests', () => {
-            const user1 = { interests: ['music', 'art', 'travel'] };
-            const user2 = { interests: ['music', 'art', 'travel'] };
-            const similarity = UserAlgo.calculateContentSimilarity(user1, user2);
-            expect(similarity).toBe(1);
+            const user = { interests: ['music', 'art', 'travel'] };
+            expect(UserAlgo.calculateContentSimilarity(user, user)).toBe(1);
         });
 
         it('should return 0 for no overlap', () => {
-            const user1 = { interests: ['music', 'art'] };
-            const user2 = { interests: ['sports', 'gaming'] };
-            const similarity = UserAlgo.calculateContentSimilarity(user1, user2);
-            expect(similarity).toBe(0);
+            expect(UserAlgo.calculateContentSimilarity(
+                { interests: ['music', 'art'] },
+                { interests: ['sports', 'gaming'] }
+            )).toBe(0);
         });
 
-        it('should return partial score for partial overlap', () => {
-            const user1 = { interests: ['music', 'art', 'travel'] };
-            const user2 = { interests: ['music', 'sports'] };
-            const similarity = UserAlgo.calculateContentSimilarity(user1, user2);
-            expect(similarity).toBeGreaterThan(0);
-            expect(similarity).toBeLessThan(1);
+        it('should return partial for partial overlap', () => {
+            const sim = UserAlgo.calculateContentSimilarity(
+                { interests: ['music', 'art', 'travel'] },
+                { interests: ['music', 'sports'] }
+            );
+            expect(sim).toBeGreaterThan(0);
+            expect(sim).toBeLessThan(1);
+        });
+
+        it('should add vibe bonus for matching vibes (v2.0)', () => {
+            const sim1 = UserAlgo.calculateContentSimilarity(
+                { interests: ['music'], dominantVibe: 'chill' },
+                { interests: ['music'], dominantVibe: 'chill' }
+            );
+            const sim2 = UserAlgo.calculateContentSimilarity(
+                { interests: ['music'], dominantVibe: 'chill' },
+                { interests: ['music'], dominantVibe: 'hype' }
+            );
+            expect(sim1).toBeGreaterThan(sim2);
+        });
+    });
+
+    describe('calculateGraphProximity (v2.0)', () => {
+        it('should score candidates followed by mutual connections', () => {
+            const scores = UserAlgo.calculateGraphProximity(
+                'me', [{ _id: 'candidate1' }],
+                ['friend1', 'friend2'],
+                { friend1: ['candidate1'], friend2: ['candidate1'] }
+            );
+            expect(scores.get('candidate1')).toBeGreaterThan(0);
+        });
+
+        it('should exclude self and already following', () => {
+            const scores = UserAlgo.calculateGraphProximity(
+                'me', [{ _id: 'me' }, { _id: 'friend1' }],
+                ['friend1'], {}
+            );
+            expect(scores.size).toBe(0);
         });
     });
 
     describe('getSuggestedUsers', () => {
-        it('should return empty array for empty candidates', async () => {
-            const result = await UserAlgo.getSuggestedUsers('user1', []);
-            expect(result).toEqual([]);
+        it('should return empty for empty candidates', async () => {
+            expect(await UserAlgo.getSuggestedUsers('u1', [])).toEqual([]);
         });
 
         it('should exclude self from suggestions', async () => {
-            const candidates = [
-                { _id: 'user1' },
-                { _id: 'user2' }
-            ];
-
-            const result = await UserAlgo.getSuggestedUsers('user1', candidates);
-
-            expect(result.find(u => u._id === 'user1')).toBeUndefined();
+            const result = await UserAlgo.getSuggestedUsers('u1', [{ _id: 'u1' }, { _id: 'u2' }]);
+            expect(result.find(u => u._id === 'u1')).toBeUndefined();
         });
 
         it('should exclude already following', async () => {
-            const candidates = [
-                { _id: 'user2' },
-                { _id: 'user3' }
-            ];
-
-            const result = await UserAlgo.getSuggestedUsers('user1', candidates, {
-                followingIds: ['user2']
-            });
-
-            expect(result.find(u => u._id === 'user2')).toBeUndefined();
+            const result = await UserAlgo.getSuggestedUsers('u1', [{ _id: 'u2' }, { _id: 'u3' }], { followingIds: ['u2'] });
+            expect(result.find(u => u._id === 'u2')).toBeUndefined();
         });
 
-        it('should add _recommendScore property', async () => {
-            const candidates = [
-                { _id: 'user2', stats: { followers: 1000 } }
-            ];
-
-            const result = await UserAlgo.getSuggestedUsers('user1', candidates);
-
+        it('should add _recommendScore', async () => {
+            const result = await UserAlgo.getSuggestedUsers('u1', [{ _id: 'u2', stats: { followers: 1000 } }]);
             expect(result[0]).toHaveProperty('_recommendScore');
         });
 
         it('should respect limit', async () => {
-            const candidates = Array(50).fill(null).map((_, i) => ({
-                _id: `user${i}`,
-                stats: { followers: i * 100 }
-            }));
-
-            const result = await UserAlgo.getSuggestedUsers('user1', candidates, { limit: 10 });
-
+            const candidates = Array(50).fill(null).map((_, i) => ({ _id: `u${i}`, stats: { followers: i * 100 } }));
+            const result = await UserAlgo.getSuggestedUsers('u1', candidates, { limit: 10 });
             expect(result.length).toBe(10);
         });
     });
 
     describe('getSimilarUsers', () => {
-        it('should exclude target user from results', async () => {
-            const target = { _id: 'target', interests: ['music'] };
-            const candidates = [
-                { _id: 'target', interests: ['music'] },
-                { _id: 'other', interests: ['music'] }
-            ];
-
-            const result = await UserAlgo.getSimilarUsers(target, candidates);
-
-            expect(result.find(u => u._id === 'target')).toBeUndefined();
+        it('should exclude target user', async () => {
+            const target = { _id: 't', interests: ['music'] };
+            const result = await UserAlgo.getSimilarUsers(target, [{ _id: 't', interests: ['music'] }, { _id: 'o', interests: ['music'] }]);
+            expect(result.find(u => u._id === 't')).toBeUndefined();
         });
 
         it('should rank by similarity', async () => {
-            const target = { _id: 'target', interests: ['music', 'art'] };
-            const candidates = [
-                { _id: 'similar', interests: ['music', 'art'] },
-                { _id: 'different', interests: ['sports'] }
-            ];
-
-            const result = await UserAlgo.getSimilarUsers(target, candidates);
-
-            expect(result[0]._id).toBe('similar');
+            const target = { _id: 't', interests: ['music', 'art'] };
+            const result = await UserAlgo.getSimilarUsers(target, [
+                { _id: 'sim', interests: ['music', 'art'] },
+                { _id: 'diff', interests: ['sports'] }
+            ]);
+            expect(result[0]._id).toBe('sim');
         });
     });
 
     describe('getTrendingCreators', () => {
         it('should filter by minimum followers', () => {
-            const users = [
-                { _id: 'small', stats: { followers: 50 } },
-                { _id: 'big', stats: { followers: 5000 } }
-            ];
-
+            const users = [{ _id: 's', stats: { followers: 50 } }, { _id: 'b', stats: { followers: 5000 } }];
             const trending = UserAlgo.getTrendingCreators(users, { minFollowers: 100 });
-
             expect(trending.length).toBe(1);
-            expect(trending[0]._id).toBe('big');
+            expect(trending[0]._id).toBe('b');
         });
 
-        it('should add _trendScore property', () => {
-            const users = [
-                { _id: 'user1', stats: { followers: 1000, followerGrowthRate: 0.1 } }
-            ];
-
-            const trending = UserAlgo.getTrendingCreators(users);
-
+        it('should add _trendScore', () => {
+            const trending = UserAlgo.getTrendingCreators([{ _id: 'u1', stats: { followers: 1000, followerGrowthRate: 0.1 } }]);
             expect(trending[0]).toHaveProperty('_trendScore');
         });
 
         it('should respect limit', () => {
-            const users = Array(50).fill(null).map((_, i) => ({
-                _id: `user${i}`,
-                stats: { followers: 1000 + i * 100 }
-            }));
-
-            const trending = UserAlgo.getTrendingCreators(users, { limit: 5 });
-
-            expect(trending.length).toBe(5);
+            const users = Array(50).fill(null).map((_, i) => ({ _id: `u${i}`, stats: { followers: 1000 + i } }));
+            expect(UserAlgo.getTrendingCreators(users, { limit: 5 }).length).toBe(5);
         });
     });
 
     describe('injectDiversity', () => {
         it('should return original if small list', () => {
             const users = [{ _id: 'u1' }, { _id: 'u2' }];
-            const result = UserAlgo.injectDiversity(users, 10);
-            expect(result).toEqual(users);
-        });
-
-        it('should mix in random users for large lists', () => {
-            const users = Array(20).fill(null).map((_, i) => ({
-                _id: `user${i}`,
-                _recommendScore: 20 - i // Descending scores
-            }));
-
-            // Run multiple times to check randomness
-            const results = [];
-            for (let i = 0; i < 5; i++) {
-                results.push(UserAlgo.injectDiversity([...users], 15).map(u => u._id).join(','));
-            }
-
-            // Should have some variation (though not guaranteed with small samples)
-            expect(results.length).toBe(5);
+            expect(UserAlgo.injectDiversity(users, 10)).toEqual(users);
         });
     });
 });

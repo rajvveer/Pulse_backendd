@@ -10,16 +10,16 @@ class Config {
   validateRequiredEnvVars() {
     const required = [
       'JWT_SECRET',
-      'JWT_REFRESH_SECRET', 
+      'JWT_REFRESH_SECRET',
       'TEMP_JWT_SECRET'
     ];
 
     const missing = required.filter(key => !process.env[key]);
-    
+
     if (missing.length > 0) {
       console.error('❌ Missing required environment variables:');
       missing.forEach(key => console.error(`   - ${key}`));
-      
+
       if (process.env.NODE_ENV === 'production') {
         process.exit(1);
       } else {
@@ -45,7 +45,8 @@ class Config {
         mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/pulse',
         mongoTestUri: process.env.MONGO_TEST_URI || 'mongodb://localhost:27017/pulse_test',
         options: {
-          maxPoolSize: parseInt(process.env.MONGO_OPTIONS_MAX_POOL_SIZE) || 10,
+          maxPoolSize: parseInt(process.env.MONGO_OPTIONS_MAX_POOL_SIZE) || 50,
+          minPoolSize: parseInt(process.env.MONGO_OPTIONS_MIN_POOL_SIZE) || 5,
           serverSelectionTimeoutMS: parseInt(process.env.MONGO_OPTIONS_SERVER_SELECTION_TIMEOUT_MS) || 5000
         }
       },
@@ -88,14 +89,14 @@ class Config {
       },
 
       // Redis Configuration
-redis: {
-  url: process.env.REDIS_URL || null,   // 👈 IMPORTANT
-  host: process.env.REDIS_HOST || "localhost",
-  port: parseInt(process.env.REDIS_PORT) || 6379,
-  password: process.env.REDIS_PASSWORD || null,
-  maxRetries: parseInt(process.env.REDIS_MAX_RETRIES) || 3,
-  retryDelayOnFailover: parseInt(process.env.REDIS_RETRY_DELAY_ON_FAILOVER) || 100
-},
+      redis: {
+        url: process.env.REDIS_URL || null,   // 👈 IMPORTANT
+        host: process.env.REDIS_HOST || "localhost",
+        port: parseInt(process.env.REDIS_PORT) || 6379,
+        password: process.env.REDIS_PASSWORD || null,
+        maxRetries: parseInt(process.env.REDIS_MAX_RETRIES) || 3,
+        retryDelayOnFailover: parseInt(process.env.REDIS_RETRY_DELAY_ON_FAILOVER) || 100
+      },
 
       // Media & Storage
       media: {

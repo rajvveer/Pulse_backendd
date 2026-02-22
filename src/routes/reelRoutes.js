@@ -25,4 +25,7 @@ router.post('/:reelId/comments', verifyAccessToken, reelController.addComment);
 // 7. Get Comments (supports ?sort=best|top|new|controversial)
 router.get('/:reelId/comments', verifyAccessToken, reelController.getComments);
 
+// 8. Like/Unlike Comment
+router.post('/:reelId/comments/:commentId/like', verifyAccessToken, reelController.toggleCommentLike);
+
 module.exports = router;

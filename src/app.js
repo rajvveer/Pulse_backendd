@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
 const crypto = require('crypto');
+const { globalLimiter } = require('./middlewares/rateLimit');
 
 const app = express();
 
@@ -22,14 +23,19 @@ app.use(cors({
 
 app.use(compression());
 
+// Global rate limiter — 200 req / 15 min per IP
+app.use(globalLimiter);
+
 // Logging middleware
-if (process.env.NODE_ENV !== 'test') {
+if (process.env.NODE_ENV === 'production') {
+  app.use(morgan('short'));
+} else if (process.env.NODE_ENV !== 'test') {
   app.use(morgan('combined'));
 }
 
-// Body parsing middleware
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Body parsing middleware (10MB — media uploads go through multer/Cloudinary)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Request metadata middleware
 app.use((req, res, next) => {
@@ -66,6 +72,10 @@ app.use('/api/v1/chains', require('./routes/chainRoutes'));
 app.use('/api/v1/alter-ego', require('./routes/alterEgoRoutes'));
 app.use('/api/v1/notifications', require('./routes/notificationRoutes'));
 app.use('/api/v1/push', require('./routes/pushRoutes'));
+app.use('/api/v1/social-dna', require('./routes/socialDNARoutes'));
+app.use('/api/v1/pulse-score', require('./routes/pulseScoreRoutes'));
+app.use('/api/v1/roulette', require('./routes/rouletteRoutes'));
+app.use('/api/v1/bookmarks', require('./routes/bookmarkRoutes'));
 
 
 // 404 handler

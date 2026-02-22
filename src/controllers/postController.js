@@ -5,6 +5,8 @@ const Like = require('../models/Like');
 const UserBehavior = require('../models/UserBehavior');
 const UserEngagement = require('../models/UserEngagement');
 const Notification = require('../models/Notification');
+const DNAMatchAlgo = require('../Algorithms/DNAMatchAlgo');
+const PulseScore = require('../models/PulseScore');
 
 // Helper function to mask anonymous posts
 const maskAnonymousPost = (post) => {
@@ -44,6 +46,16 @@ exports.createPost = async (req, res) => {
     await User.findByIdAndUpdate(req.user.userId, {
       $inc: { 'stats.posts': 1 }
     });
+
+    // 🧬 Record Social DNA signal (non-blocking)
+    DNAMatchAlgo.recordInteraction(req.user.userId, post, 'post').catch(() => { });
+
+    // 📊 Record Pulse Score signal (non-blocking)
+    PulseScore.getOrCreate(req.user.userId).then(ps => {
+      ps.recordAction('post');
+      if (post.image || post.media?.length > 0) ps.recordAction('media_post');
+      ps.save().catch(() => { });
+    }).catch(() => { });
 
     // ✅ FIX: Added 'profile'
     await post.populate('author', 'username name avatar profile isVerified');
@@ -197,6 +209,13 @@ exports.toggleLike = async (req, res) => {
       UserBehavior.recordLike(userId, post).catch(() => { });
       UserEngagement.recordSignal(userId, authorId, 'likes', 1).catch(() => { });
 
+      // 🧬 Record Social DNA signal (non-blocking)
+      DNAMatchAlgo.recordInteraction(userId, post, 'like').catch(() => { });
+
+      // 📊 Record Pulse Score signals (non-blocking)
+      PulseScore.getOrCreate(userId).then(ps => { ps.recordAction('like_given'); ps.save().catch(() => { }); }).catch(() => { });
+      PulseScore.getOrCreate(authorId).then(ps => { ps.recordAction('like_received'); ps.save().catch(() => { }); }).catch(() => { });
+
       // Create notification for post author
       Notification.createNotification({
         recipient: authorId,
@@ -293,7 +312,8 @@ exports.addComment = async (req, res) => {
 exports.getComments = async (req, res) => {
   try {
     const { postId } = req.params;
-    const { page = 1, limit = 20 } = req.query;
+    const { page = 1, limit = 20, sort = 'recent' } = req.query;
+    const userId = req.user?.userId;
 
     const comments = await Comment.find({
       post: postId,
@@ -339,6 +359,23 @@ exports.getComments = async (req, res) => {
 
     const populatedComments = await populateNestedReplies(comments);
 
+    // Add isLikedByMe flag and likesCount for each comment (including replies)
+    const addLikeInfo = (commentsList) => {
+      for (const comment of commentsList) {
+        comment.likesCount = comment.likes?.length || 0;
+        comment.isLikedByMe = userId ? (comment.likes || []).some(id => id.toString() === userId.toString()) : false;
+        if (comment.replies && comment.replies.length > 0) {
+          addLikeInfo(comment.replies);
+        }
+      }
+    };
+    addLikeInfo(populatedComments);
+
+    // Sort by likes count if sort=top
+    if (sort === 'top') {
+      populatedComments.sort((a, b) => (b.likesCount || 0) - (a.likesCount || 0));
+    }
+
     res.json({
       success: true,
       data: populatedComments,
@@ -350,6 +387,38 @@ exports.getComments = async (req, res) => {
   } catch (error) {
     console.error('Get comments error:', error.message);
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Toggle like on a comment
+exports.toggleCommentLike = async (req, res) => {
+  try {
+    const { commentId } = req.params;
+    const userId = req.user.userId;
+
+    const comment = await Comment.findById(commentId);
+    if (!comment) {
+      return res.status(404).json({ success: false, message: 'Comment not found' });
+    }
+
+    const likeIndex = comment.likes.findIndex(id => id.toString() === userId.toString());
+    if (likeIndex === -1) {
+      comment.likes.push(userId);
+    } else {
+      comment.likes.splice(likeIndex, 1);
+    }
+    await comment.save();
+
+    res.json({
+      success: true,
+      data: {
+        isLiked: likeIndex === -1,
+        likesCount: comment.likes.length
+      }
+    });
+  } catch (error) {
+    console.error('Toggle comment like error:', error.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 

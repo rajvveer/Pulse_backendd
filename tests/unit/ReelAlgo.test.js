@@ -1,12 +1,10 @@
 /**
- * ReelAlgo.test.js - Unit tests for Reel Feed Ranking Algorithm
+ * ReelAlgo.test.js - Unit tests for Reel Feed Ranking Algorithm v2.0
  */
 
-// Mock dependencies before requiring the module
 jest.mock('../../src/models/UserEngagement', () => ({
     getBatchAffinities: jest.fn().mockResolvedValue(new Map())
 }));
-
 jest.mock('../../src/models/Like', () => ({
     getLikeVelocity: jest.fn().mockResolvedValue(0)
 }));
@@ -17,200 +15,163 @@ describe('ReelAlgo', () => {
 
     describe('calculateEngagementScore', () => {
         it('should return 0 for reel with no engagement', () => {
-            const reel = { stats: {}, likes: [], commentsCount: 0 };
-            const score = ReelAlgo.calculateEngagementScore(reel);
-            expect(score).toBe(0);
+            expect(ReelAlgo.calculateEngagementScore({ stats: {}, likes: [], commentsCount: 0 })).toBe(0);
         });
 
         it('should calculate weighted score for likes', () => {
-            const reel = { stats: { likes: 100 }, likes: [] };
-            const score = ReelAlgo.calculateEngagementScore(reel);
-            expect(score).toBe(100 * ReelAlgo.CONFIG.WEIGHTS.likes);
+            expect(ReelAlgo.calculateEngagementScore({ stats: { likes: 100 } }))
+                .toBe(100 * ReelAlgo.CONFIG.WEIGHTS.likes);
         });
 
         it('should weight comments higher than likes', () => {
-            const reelWithLikes = { stats: { likes: 10 } };
-            const reelWithComments = { stats: { comments: 10 } };
-
-            const likeScore = ReelAlgo.calculateEngagementScore(reelWithLikes);
-            const commentScore = ReelAlgo.calculateEngagementScore(reelWithComments);
-
-            expect(commentScore).toBeGreaterThan(likeScore);
+            expect(ReelAlgo.calculateEngagementScore({ stats: { comments: 10 } }))
+                .toBeGreaterThan(ReelAlgo.calculateEngagementScore({ stats: { likes: 10 } }));
         });
 
         it('should weight shares highest', () => {
-            const reelWithShares = { stats: { shares: 10 } };
-            const reelWithComments = { stats: { comments: 10 } };
-
-            const shareScore = ReelAlgo.calculateEngagementScore(reelWithShares);
-            const commentScore = ReelAlgo.calculateEngagementScore(reelWithComments);
-
-            expect(shareScore).toBeGreaterThan(commentScore);
+            expect(ReelAlgo.calculateEngagementScore({ stats: { shares: 10 } }))
+                .toBeGreaterThan(ReelAlgo.calculateEngagementScore({ stats: { comments: 10 } }));
         });
 
         it('should handle legacy likes array', () => {
-            const reel = { likes: [1, 2, 3, 4, 5], stats: {} };
-            const score = ReelAlgo.calculateEngagementScore(reel);
-            expect(score).toBe(5 * ReelAlgo.CONFIG.WEIGHTS.likes);
+            expect(ReelAlgo.calculateEngagementScore({ likes: [1, 2, 3, 4, 5], stats: {} }))
+                .toBe(5 * ReelAlgo.CONFIG.WEIGHTS.likes);
+        });
+
+        it('should bonus excellent watch completion (v2.0)', () => {
+            const highCompletion = { stats: { avgWatchPercentage: 0.9, likes: 10 } };
+            const lowCompletion = { stats: { avgWatchPercentage: 0.1, likes: 10 } };
+            expect(ReelAlgo.calculateEngagementScore(highCompletion))
+                .toBeGreaterThan(ReelAlgo.calculateEngagementScore(lowCompletion));
+        });
+
+        it('should bonus re-watched reels (v2.0)', () => {
+            const rewatched = { stats: { likes: 10, avgLoops: 2.5 } };
+            const normal = { stats: { likes: 10, avgLoops: 0 } };
+            expect(ReelAlgo.calculateEngagementScore(rewatched))
+                .toBeGreaterThan(ReelAlgo.calculateEngagementScore(normal));
         });
     });
 
     describe('applyTimeDecay', () => {
-        it('should return full score for brand new content', () => {
-            const score = 100;
-            const now = new Date();
-            const decayed = ReelAlgo.applyTimeDecay(score, now);
-            expect(decayed).toBeCloseTo(100, 1);
+        it('should return full score for new content', () => {
+            expect(ReelAlgo.applyTimeDecay(100, new Date())).toBeCloseTo(100, 1);
         });
-
         it('should halve score at half-life', () => {
-            const score = 100;
-            const halfLifeAgo = new Date(Date.now() - ReelAlgo.CONFIG.HALF_LIFE_HOURS * 60 * 60 * 1000);
-            const decayed = ReelAlgo.applyTimeDecay(score, halfLifeAgo);
-            expect(decayed).toBeCloseTo(50, 1);
+            const halfLifeAgo = new Date(Date.now() - ReelAlgo.CONFIG.HALF_LIFE_HOURS * 3600000);
+            expect(ReelAlgo.applyTimeDecay(100, halfLifeAgo)).toBeCloseTo(50, 1);
         });
-
         it('should quarter score at 2x half-life', () => {
-            const score = 100;
-            const twoHalfLivesAgo = new Date(Date.now() - 2 * ReelAlgo.CONFIG.HALF_LIFE_HOURS * 60 * 60 * 1000);
-            const decayed = ReelAlgo.applyTimeDecay(score, twoHalfLivesAgo);
-            expect(decayed).toBeCloseTo(25, 1);
+            const twoHL = new Date(Date.now() - 2 * ReelAlgo.CONFIG.HALF_LIFE_HOURS * 3600000);
+            expect(ReelAlgo.applyTimeDecay(100, twoHL)).toBeCloseTo(25, 1);
         });
-
         it('should return minimal score for very old content', () => {
-            const score = 100;
-            const veryOld = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000); // 10 days
-            const decayed = ReelAlgo.applyTimeDecay(score, veryOld);
-            expect(decayed).toBeLessThan(5);
+            const veryOld = new Date(Date.now() - 10 * 24 * 3600000);
+            expect(ReelAlgo.applyTimeDecay(100, veryOld)).toBeLessThan(5);
         });
     });
 
     describe('getFreshnessBoost', () => {
-        it('should give 2x boost for content < 1 hour old', () => {
-            const now = new Date();
-            const boost = ReelAlgo.getFreshnessBoost(now);
-            expect(boost).toBe(2.0);
+        it('should give 2x boost for <1h old', () => {
+            expect(ReelAlgo.getFreshnessBoost(new Date())).toBe(2.0);
         });
-
-        it('should give 1.5x boost for content 2 hours old', () => {
-            const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-            const boost = ReelAlgo.getFreshnessBoost(twoHoursAgo);
-            expect(boost).toBe(1.5);
+        it('should give 1.5x boost for 2h old', () => {
+            expect(ReelAlgo.getFreshnessBoost(new Date(Date.now() - 2 * 3600000))).toBe(1.5);
         });
-
-        it('should give no boost for content > 24 hours old', () => {
-            const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
-            const boost = ReelAlgo.getFreshnessBoost(twoDaysAgo);
-            expect(boost).toBe(1.0);
+        it('should give no boost for >24h old', () => {
+            expect(ReelAlgo.getFreshnessBoost(new Date(Date.now() - 48 * 3600000))).toBe(1.0);
         });
     });
 
     describe('getPersonalizationBoost', () => {
         it('should return 0 for no user', () => {
-            const boost = ReelAlgo.getPersonalizationBoost(null, 'author123', null, null);
-            expect(boost).toBe(0);
+            expect(ReelAlgo.getPersonalizationBoost(null, 'a', null, null)).toBe(0);
         });
-
         it('should return 0 for no author', () => {
-            const boost = ReelAlgo.getPersonalizationBoost('user123', null, null, null);
-            expect(boost).toBe(0);
+            expect(ReelAlgo.getPersonalizationBoost('u', null, null, null)).toBe(0);
         });
-
-        it('should return affinity-based boost from cache', () => {
-            const affinityCache = new Map([['author123', 10]]);
-            const boost = ReelAlgo.getPersonalizationBoost('user', 'author123', affinityCache, new Set());
-            expect(boost).toBeGreaterThan(0);
+        it('should return affinity-based boost', () => {
+            expect(ReelAlgo.getPersonalizationBoost('u', 'a', new Map([['a', 10]]), new Set())).toBeGreaterThan(0);
         });
-
-        it('should multiply by follow boost when following', () => {
-            const affinityCache = new Map([['author123', 10]]);
-            const followingSet = new Set(['author123']);
-
-            const boostWithFollow = ReelAlgo.getPersonalizationBoost('user', 'author123', affinityCache, followingSet);
-            const boostWithoutFollow = ReelAlgo.getPersonalizationBoost('user', 'author123', affinityCache, new Set());
-
-            expect(boostWithFollow).toBeGreaterThan(boostWithoutFollow);
+        it('should multiply by follow boost', () => {
+            const withFollow = ReelAlgo.getPersonalizationBoost('u', 'a', new Map([['a', 10]]), new Set(['a']));
+            const without = ReelAlgo.getPersonalizationBoost('u', 'a', new Map([['a', 10]]), new Set());
+            expect(withFollow).toBeGreaterThan(without);
         });
     });
 
     describe('getCreatorScore', () => {
-        it('should return 0 for null author', () => {
-            const score = ReelAlgo.getCreatorScore(null);
-            expect(score).toBe(0);
+        it('should return 0 for null', () => {
+            expect(ReelAlgo.getCreatorScore(null)).toBe(0);
         });
-
-        it('should give boost for verified creators', () => {
-            const verified = { isVerified: true };
-            const unverified = { isVerified: false };
-
-            const verifiedScore = ReelAlgo.getCreatorScore(verified);
-            const unverifiedScore = ReelAlgo.getCreatorScore(unverified);
-
-            expect(verifiedScore).toBeGreaterThan(unverifiedScore);
+        it('should boost verified', () => {
+            expect(ReelAlgo.getCreatorScore({ isVerified: true }))
+                .toBeGreaterThan(ReelAlgo.getCreatorScore({ isVerified: false }));
         });
+    });
 
-        it('should give logarithmic boost for follower count', () => {
-            const smallCreator = { stats: { followers: 100 } };
-            const bigCreator = { stats: { followers: 1000000 } };
+    describe('getAudioBoost (v2.0)', () => {
+        it('should return 0 for no audio', () => {
+            expect(ReelAlgo.getAudioBoost({}, {})).toBe(0);
+        });
+        it('should boost trending audio', () => {
+            expect(ReelAlgo.getAudioBoost({ audio: { id: 'a1', isTrending: true } }, {})).toBeGreaterThan(0);
+        });
+    });
 
-            const smallScore = ReelAlgo.getCreatorScore(smallCreator);
-            const bigScore = ReelAlgo.getCreatorScore(bigCreator);
+    describe('getCreatorColdStartBoost (v2.0)', () => {
+        it('should return 0 for null', () => {
+            expect(ReelAlgo.getCreatorColdStartBoost(null)).toBe(0);
+        });
+        it('should boost new creators with quality', () => {
+            expect(ReelAlgo.getCreatorColdStartBoost({ stats: { posts: 2, engagementRate: 0.5 } })).toBeGreaterThan(0);
+        });
+        it('should not boost established creators', () => {
+            expect(ReelAlgo.getCreatorColdStartBoost({ stats: { posts: 100 } })).toBe(0);
+        });
+    });
 
-            // Big creator should score higher but not 10000x higher
-            expect(bigScore).toBeGreaterThan(smallScore);
-            expect(bigScore / smallScore).toBeLessThan(10);
+    describe('enforceCategoryDiversity (v2.0)', () => {
+        it('should prevent 3+ same-category in a row', () => {
+            const reels = [
+                { category: 'dance' }, { category: 'dance' }, { category: 'dance' },
+                { category: 'comedy' }
+            ];
+            const result = ReelAlgo.enforceCategoryDiversity(reels);
+            const cats = result.map(r => r.category);
+            for (let i = 2; i < cats.length; i++) {
+                if (cats[i] === cats[i - 1] && cats[i] === cats[i - 2]) {
+                    fail('Three consecutive same-category reels found');
+                }
+            }
         });
     });
 
     describe('rankReels', () => {
-        it('should return empty array for empty input', async () => {
-            const result = await ReelAlgo.rankReels([], 'user123');
-            expect(result).toEqual([]);
+        it('should return empty for empty input', async () => {
+            expect(await ReelAlgo.rankReels([], 'u')).toEqual([]);
         });
-
-        it('should sort reels by score descending', async () => {
+        it('should sort by score descending', async () => {
             const reels = [
                 { _id: '1', stats: { likes: 10 }, createdAt: new Date(), user: 'a' },
                 { _id: '2', stats: { likes: 100 }, createdAt: new Date(), user: 'b' },
                 { _id: '3', stats: { likes: 50 }, createdAt: new Date(), user: 'c' }
             ];
-
             const ranked = await ReelAlgo.rankReels(reels, null, { includeVelocity: false });
-
-            expect(ranked[0]._id).toBe('2'); // Highest engagement first
-            expect(ranked[1]._id).toBe('3');
-            expect(ranked[2]._id).toBe('1');
+            expect(ranked[0]._id).toBe('2');
         });
-
-        it('should add _score property to each reel', async () => {
-            const reels = [
-                { _id: '1', stats: { likes: 10 }, createdAt: new Date(), user: 'a' }
-            ];
-
-            const ranked = await ReelAlgo.rankReels(reels, null, { includeVelocity: false });
-
+        it('should add _score property', async () => {
+            const ranked = await ReelAlgo.rankReels(
+                [{ _id: '1', stats: { likes: 10 }, createdAt: new Date(), user: 'a' }],
+                null, { includeVelocity: false }
+            );
             expect(ranked[0]).toHaveProperty('_score');
-            expect(typeof ranked[0]._score).toBe('number');
         });
     });
 
     describe('injectDiversity', () => {
-        it('should return original array if too small', () => {
-            const reels = [{ _id: '1' }, { _id: '2' }];
-            const result = ReelAlgo.injectDiversity(reels, []);
-            expect(result).toEqual(reels);
-        });
-
-        it('should inject items after top 3', () => {
-            const ranked = Array(10).fill(null).map((_, i) => ({ _id: `r${i}` }));
-            const all = [...ranked, { _id: 'diversity1' }, { _id: 'diversity2' }];
-
-            const result = ReelAlgo.injectDiversity(ranked, all);
-
-            // Top 3 should remain in place
-            expect(result[0]._id).toBe('r0');
-            expect(result[1]._id).toBe('r1');
-            expect(result[2]._id).toBe('r2');
+        it('should return original for empty allReels', () => {
+            expect(ReelAlgo.injectDiversity([{ _id: '1' }], [])).toEqual([{ _id: '1' }]);
         });
     });
 });

@@ -31,12 +31,12 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
     credentials: config.get('cors.credentials')
   },
-  // ✅ PING/PONG SETTINGS - Must match frontend for mobile reliability
-  pingTimeout: 30000,     // 30 seconds - match frontend
-  pingInterval: 25000,    // 25 seconds - match frontend
+  // ✅ PING/PONG — reclaim dead sockets faster
+  pingTimeout: 20000,     // 20 seconds — detect dead connections sooner
+  pingInterval: 25000,    // 25 seconds
 
-  // ✅ TRANSPORT SETTINGS - Allow polling for mobile networks
-  transports: ['polling', 'websocket'],
+  // ✅ TRANSPORT — prefer websocket, fallback to polling
+  transports: ['websocket', 'polling'],
   allowUpgrades: true,
 
   // ✅ CONNECTION SETTINGS
@@ -44,6 +44,16 @@ const io = new Server(server, {
 
   // ✅ BUFFER SETTINGS
   maxHttpBufferSize: 1e6, // 1MB max message size
+
+  // ✅ PERFORMANCE — disable per-message compression (let Express handle it)
+  perMessageDeflate: false,
+  httpCompression: false,
+
+  // ✅ RECONNECTION — auto-recover connection state
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    skipMiddlewares: true,
+  },
 });
 
 // ✅ ADDED: Socket Authentication Middleware

@@ -1,4 +1,5 @@
 const AlterEgo = require('../models/AlterEgo');
+const { getActiveProvider } = require('../services/alterEgoAIService');
 
 // Get user's alter ego
 exports.getMyEgo = async (req, res) => {
@@ -155,7 +156,9 @@ exports.getStats = async (req, res) => {
                 trainingLevel: ego.trainingLevel,
                 isActive: ego.isActive,
                 lastActive: ego.lastActive,
-                personality: ego.personality
+                personality: ego.personality,
+                guessWhoStats: ego.guessWhoStats,
+                aiProvider: getActiveProvider()
             }
         });
     } catch (error) {
@@ -190,6 +193,85 @@ exports.learn = async (req, res) => {
         res.json({ success: true, message: 'Learned!' });
     } catch (error) {
         console.error('Learn error:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ================================================
+//  ALTER EGO 2.0 — NEW ENDPOINTS
+// ================================================
+
+// Get activity log (paginated)
+exports.getActivityLog = async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const { page = 1, limit = 20 } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const ego = await AlterEgo.findOne({ user: userId });
+        if (!ego) {
+            return res.status(404).json({ success: false, message: 'Alter Ego not found' });
+        }
+
+        const activities = ego.activityLog.slice(skip, skip + parseInt(limit));
+
+        res.json({
+            success: true,
+            data: activities,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                total: ego.activityLog.length,
+                hasMore: skip + parseInt(limit) < ego.activityLog.length
+            }
+        });
+    } catch (error) {
+        console.error('Get activity log error:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// Record guess-who game result
+exports.recordGuess = async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const { guessedCorrectly } = req.body;
+
+        if (typeof guessedCorrectly !== 'boolean') {
+            return res.status(400).json({
+                success: false,
+                message: 'guessedCorrectly (boolean) required'
+            });
+        }
+
+        const ego = await AlterEgo.findOne({ user: userId });
+        if (!ego) {
+            return res.status(404).json({ success: false, message: 'Alter Ego not found' });
+        }
+
+        const stats = await ego.recordGuessResult(guessedCorrectly);
+
+        res.json({
+            success: true,
+            data: stats
+        });
+    } catch (error) {
+        console.error('Record guess error:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// Get AI provider status
+exports.getAIStatus = async (req, res) => {
+    try {
+        res.json({
+            success: true,
+            data: {
+                provider: getActiveProvider(),
+                isAIEnabled: getActiveProvider() !== 'template'
+            }
+        });
+    } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
 };

@@ -24,29 +24,35 @@ const getOptimizedVideoUrl = (url) => {
 };
 
 // ✅ HELPER: Normalize User Object
+const BROKEN_DEFAULT_AVATAR = '/defaults/avatar.png';
+
 const normalizeUser = (user) => {
   if (!user) return null;
 
-  // Extract avatar from all possible locations
+  // Helper to check if a URL is the broken Cloudinary default (not a real user avatar)
+  const isValidAvatar = (url) => url && !url.includes(BROKEN_DEFAULT_AVATAR);
+
   let cleanAvatarUrl = null;
 
-  // Check profile.avatar first (main location)
-  if (user.profile && user.profile.avatar) {
+  // 1. Check profile.avatar (skip if it's the schema default placeholder)
+  if (isValidAvatar(user.profile?.avatar)) {
     cleanAvatarUrl = user.profile.avatar;
   }
-  // Check authMethods for OAuth avatars
-  else if (user.authMethods && user.authMethods.length > 0 && user.authMethods[0].profile?.avatar) {
-    cleanAvatarUrl = user.authMethods[0].profile.avatar;
-  }
-  // Check direct avatar field
-  else if (user.avatar) {
+  // 2. Check direct avatar field
+  else if (isValidAvatar(user.avatar)) {
     cleanAvatarUrl = user.avatar;
   }
-  // Default fallback
-  else {
-    cleanAvatarUrl = 'https://res.cloudinary.com/pulse/image/upload/v1/defaults/avatar.png';
+  // 3. Check authMethods for OAuth avatars (Google profile picture etc.)
+  else if (user.authMethods?.length > 0) {
+    for (const method of user.authMethods) {
+      if (isValidAvatar(method.profile?.avatar)) {
+        cleanAvatarUrl = method.profile.avatar;
+        break;
+      }
+    }
   }
 
+  // null means "no real avatar" — frontend will show the initial letter fallback
   return {
     _id: user._id,
     username: user.username,
@@ -379,13 +385,13 @@ exports.getComments = async (req, res) => {
       .sort({ createdAt: -1 })
       .populate({
         path: 'author',
-        select: '+authMethods username profile avatar isVerified'
+        select: 'username profile avatar isVerified'
       })
       .populate({
         path: 'replies',
         populate: {
           path: 'author',
-          select: '+authMethods username profile avatar isVerified'
+          select: 'username profile avatar isVerified'
         }
       })
       .lean({ virtuals: true });
@@ -430,7 +436,40 @@ exports.getComments = async (req, res) => {
 };
 
 // =========================================================
-//  7. SHARE REEL - Track for algorithm
+//  7. TOGGLE COMMENT LIKE
+// =========================================================
+exports.toggleCommentLike = async (req, res) => {
+  try {
+    const { commentId } = req.params;
+    const userId = req.user.userId;
+
+    const comment = await ReelComment.findById(commentId);
+    if (!comment) return res.status(404).json({ success: false, message: 'Comment not found' });
+
+    const likeIndex = comment.likes.indexOf(userId);
+    if (likeIndex === -1) {
+      comment.likes.push(userId);
+    } else {
+      comment.likes.splice(likeIndex, 1);
+    }
+    await comment.save();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        isLiked: likeIndex === -1,
+        likesCount: comment.likes.length
+      }
+    });
+
+  } catch (error) {
+    console.error('Toggle Comment Like Error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// =========================================================
+//  8. SHARE REEL - Track for algorithm
 // =========================================================
 exports.shareReel = async (req, res) => {
   try {

@@ -26,7 +26,7 @@ const reelCommentSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }]
-}, { 
+}, {
   timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true }
@@ -39,13 +39,7 @@ reelCommentSchema.virtual('replies', {
   foreignField: 'parentComment'
 });
 
-// Auto-populate author details when finding comments
-reelCommentSchema.pre(/^find/, function(next) {
-  this.populate({
-    path: 'author',
-    select: 'username avatar isVerified'
-  });
-  next();
-});
+// Note: author population is handled explicitly in the controller
+// to ensure correct field selection (profile.avatar, not top-level avatar)
 
 module.exports = mongoose.model('ReelComment', reelCommentSchema);

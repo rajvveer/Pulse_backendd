@@ -14,11 +14,22 @@ class DatabaseConfig {
       }
 
       const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/pulse';
-      
+
       const options = {
-        maxPoolSize: parseInt(process.env.MONGO_OPTIONS_MAX_POOL_SIZE) || 10,
+        // Connection pool — sized for high concurrency per worker
+        maxPoolSize: parseInt(process.env.MONGO_OPTIONS_MAX_POOL_SIZE) || 50,
+        minPoolSize: parseInt(process.env.MONGO_OPTIONS_MIN_POOL_SIZE) || 5,
+        maxIdleTimeMS: 30000,
+
+        // Timeouts
         serverSelectionTimeoutMS: parseInt(process.env.MONGO_OPTIONS_SERVER_SELECTION_TIMEOUT_MS) || 5000,
         socketTimeoutMS: 45000,
+        connectTimeoutMS: 10000,
+
+        // Reliability
+        heartbeatFrequencyMS: 10000,
+        retryWrites: true,
+        retryReads: true,
       };
 
       this.connection = await mongoose.connect(MONGO_URI, options);
@@ -48,11 +59,11 @@ class DatabaseConfig {
 
     } catch (error) {
       console.error('❌ MongoDB connection failed:', error.message);
-      
+
       if (process.env.NODE_ENV === 'production') {
         process.exit(1);
       }
-      
+
       throw error;
     }
   }
@@ -97,7 +108,7 @@ class DatabaseConfig {
     try {
       console.log('📝 Creating database indexes...');
       const collections = mongoose.connection.collections;
-      
+
       for (const [name, collection] of Object.entries(collections)) {
         const indexes = await collection.listIndexes().toArray();
         console.log(`📊 ${name} has ${indexes.length} indexes`);

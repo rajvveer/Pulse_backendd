@@ -32,5 +32,6 @@ router.post('/:postId/like', verifyAccessToken, postController.toggleLike);
 // Comments
 router.post('/:postId/comments', verifyAccessToken, postController.addComment);
 router.get('/:postId/comments', verifyAccessToken, postController.getComments);
+router.post('/:postId/comments/:commentId/like', verifyAccessToken, postController.toggleCommentLike);
 
 module.exports = router;
