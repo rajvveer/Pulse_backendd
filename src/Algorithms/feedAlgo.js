@@ -25,7 +25,7 @@ const CONFIG = {
     FATIGUE: { MAX_SAME_AUTHOR_IN_BATCH: 3, TOPIC_SATURATION_THRESHOLD: 0.4, TOPIC_FATIGUE_PENALTY: 0.6 },
     NEGATIVE_SIGNALS: { SKIP_PENALTY: 0.7, HIDE_PENALTY: 0.3, UNFOLLOW_AUTHOR_PENALTY: 0.1 },
     COLD_START: { MIN_INTERACTIONS: 10, TRENDING_WEIGHT: 3.0, VERIFIED_BOOST: 1.8 },
-    QUALITY_GATE: { MIN_ENGAGEMENT_OLD_POSTS: 3, OLD_POST_AGE_HOURS: 24 },
+    QUALITY_GATE: { MIN_ENGAGEMENT_OLD_POSTS: 1, OLD_POST_AGE_HOURS: 48 },
     FEEDBACK: { POSITIVE_BOOST: 1.3, NEGATIVE_DAMPEN: 0.7 }
 };
 
@@ -194,6 +194,8 @@ function applyNegativeSignals(posts, signals = {}) {
 
 function applyQualityGate(posts) {
     return posts.filter(post => {
+        // Never filter out anonymous posts
+        if (post.isAnonymous) return true;
         const hrs = (Date.now() - new Date(post.createdAt).getTime()) / 3600000;
         if (hrs < CONFIG.QUALITY_GATE.OLD_POST_AGE_HOURS) return true;
         const s = post.stats || {};
