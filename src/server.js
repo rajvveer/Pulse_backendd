@@ -27,9 +27,9 @@ const server = createServer(app);
 // Initialize Socket.IO with production-ready settings
 const io = new Server(server, {
   cors: {
-    origin: config.get('cors.origin') || '*', // Allow all origins for mobile apps
+    origin: '*', // Allow all origins — required for mobile app connections
     methods: ["GET", "POST"],
-    credentials: config.get('cors.credentials')
+    credentials: false // Must be false when origin is '*'
   },
   // ✅ PING/PONG — reclaim dead sockets faster
   pingTimeout: 20000,     // 20 seconds — detect dead connections sooner
@@ -64,7 +64,7 @@ io.use((socket, next) => {
       // Get token from auth object
       const token = socket.handshake.auth.token;
       // Verify token (using your config secret)
-      const decoded = jwt.verify(token, config.get('jwt.accessTokenSecret') || process.env.JWT_SECRET);
+      const decoded = jwt.verify(token, config.get('jwt.secret') || process.env.JWT_SECRET);
       socket.userId = decoded.userId;
       next();
     } catch (err) {

@@ -8,7 +8,7 @@ const { globalLimiter } = require('./middlewares/rateLimit');
 
 const app = express();
 
-app.set('trust proxy', 'loopback');
+app.set('trust proxy', true);
 
 // Security middleware
 app.use(helmet({
