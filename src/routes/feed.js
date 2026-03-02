@@ -6,6 +6,9 @@ const feedController = require('../controllers/feedController');
 // For You - personalized discovery feed
 router.get('/foryou', verifyAccessToken, feedController.getForYouFeed);
 
+// Following feed - chronological posts from followed users
+router.get('/following', verifyAccessToken, feedController.getFollowingFeed);
+
 // Global feed - all public posts with light ranking
 router.get('/global', verifyAccessToken, feedController.getGlobalFeed);
 

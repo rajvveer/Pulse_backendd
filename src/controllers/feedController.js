@@ -112,6 +112,61 @@ exports.getHomeFeed = async (req, res) => {
 
 
 /**
+ * @desc    Get Following feed (chronological posts from followed users)
+ * @route   GET /api/v1/feed/following
+ * @access  Private
+ */
+exports.getFollowingFeed = async (req, res) => {
+    try {
+        const { page = 1, limit = 20 } = req.query;
+        const userId = req.user.userId;
+
+        const user = await User.findById(userId).select('following').lean();
+        const followingIds = user?.following || [];
+
+        if (followingIds.length === 0) {
+            return res.json({
+                success: true,
+                data: [],
+                pagination: { page: 1, limit: parseInt(limit), hasMore: false, feedType: 'following' }
+            });
+        }
+
+        // Pure chronological — no algorithm, just newest first from followed users
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const posts = await Post.find({
+            author: { $in: followingIds },
+            isActive: true,
+            visibility: { $in: ['public', 'followers'] }
+        })
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(parseInt(limit) + 1) // Fetch one extra to check hasMore
+            .populate('author', 'username name avatar profile isVerified stats')
+            .lean();
+
+        const hasMore = posts.length > parseInt(limit);
+        const paginatedPosts = hasMore ? posts.slice(0, parseInt(limit)) : posts;
+
+        const postsWithLikes = await processPosts(paginatedPosts, userId);
+
+        res.json({
+            success: true,
+            data: postsWithLikes,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                hasMore,
+                feedType: 'following'
+            }
+        });
+    } catch (error) {
+        console.error('Get following feed error:', error.message);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+/**
  * @desc    Get "For You" discovery feed (personalized discovery)
  * @route   GET /api/v1/feed/foryou
  * @access  Private
