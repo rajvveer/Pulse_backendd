@@ -258,6 +258,7 @@ exports.updateProfile = async (req, res) => {
       'profile.location',
       'profile.website',
       'profile.avatar',
+      'profile.coverPhoto',
       'avatar',
       // Settings fields
       'settings.pushNotifications',

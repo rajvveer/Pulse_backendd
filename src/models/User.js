@@ -71,7 +71,7 @@ const userSchema = new mongoose.Schema({
     },
     avatar: {
       type: String,
-      default: 'https://res.cloudinary.com/pulse/image/upload/v1/defaults/avatar.png'
+      default: ''
     },
     coverPhoto: {
       type: String,
@@ -315,6 +315,24 @@ const userSchema = new mongoose.Schema({
   lastCommentAt: {
     type: Date,
     default: null
+  },
+
+  // ===== REFERRAL SYSTEM =====
+  referralCode: {
+    type: String,
+    unique: true,
+    sparse: true,
+    uppercase: true,
+    trim: true
+  },
+  referredBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  referralCount: {
+    type: Number,
+    default: 0
   }
 
 }, {
@@ -340,6 +358,7 @@ userSchema.index({ lastLocation: '2dsphere' });
 // Activity indexes
 userSchema.index({ lastActive: -1 });
 userSchema.index({ createdAt: -1 });
+userSchema.index({ referralCode: 1 }, { unique: true, sparse: true });
 
 // ===== VIRTUAL FIELDS =====
 userSchema.virtual('followerCount').get(function () {

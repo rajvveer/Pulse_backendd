@@ -56,27 +56,23 @@ const io = new Server(server, {
   },
 });
 
-// ✅ ADDED: Socket Authentication Middleware
-// This ensures 'socket.userId' exists for the chat logic
+// ✅ Socket Authentication Middleware
+// Tries to verify the token, but allows connection even if token is expired.
+// The 'user-online' event will set socket.userId with a fresh identity.
 io.use((socket, next) => {
   if (socket.handshake.auth && socket.handshake.auth.token) {
     try {
-      // Get token from auth object
       const token = socket.handshake.auth.token;
-      // Verify token (using your config secret)
       const decoded = jwt.verify(token, config.get('jwt.secret') || process.env.JWT_SECRET);
       socket.userId = decoded.userId;
-      next();
     } catch (err) {
-      console.error('Socket Auth Error:', err.message);
-      next(new Error('Authentication error'));
+      // ✅ FIX: Don't reject the connection — allow it without userId.
+      // The 'user-online' event will identify the user once the app
+      // refreshes its HTTP token and re-emits 'user-online'.
+      console.warn('Socket Auth Warning:', err.message, '— allowing connection without userId');
     }
-  } else {
-    // Allow unauthenticated connections if needed (or fail)
-    // For chat, we usually want auth, but we'll let it pass to next() 
-    // so your existing 'user-online' logic doesn't break.
-    next();
   }
+  next();
 });
 
 // Initialization function

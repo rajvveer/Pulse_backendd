@@ -76,6 +76,10 @@ app.use('/api/v1/social-dna', require('./routes/socialDNARoutes'));
 app.use('/api/v1/pulse-score', require('./routes/pulseScoreRoutes'));
 app.use('/api/v1/roulette', require('./routes/rouletteRoutes'));
 app.use('/api/v1/bookmarks', require('./routes/bookmarkRoutes'));
+app.use('/api/v1/referral', require('./routes/referralRoutes'));
+
+// Open Graph share routes (public — no auth, crawlers need access)
+app.use('/share', require('./routes/ogRoutes'));
 
 
 // 404 handler
