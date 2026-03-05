@@ -56,15 +56,96 @@ const isFirebaseReady = () => {
 };
 
 /**
- * Send push notification to a specific FCM token
- * @param {string} token - FCM token
+ * Send push notification via Expo's push API
+ * @param {string} expoPushToken - Expo push token (ExponentPushToken[...])
+ * @param {Object} notification - { title, body, imageUrl }
+ * @param {Object} data - Additional data payload
+ * @returns {Promise<Object>}
+ */
+const sendViaExpo = async (expoPushToken, notification, data = {}) => {
+    return new Promise((resolve) => {
+        try {
+            const https = require('https');
+            const payload = JSON.stringify({
+                to: expoPushToken,
+                sound: 'default',
+                title: notification.title,
+                body: notification.body,
+                data: data,
+                priority: 'high',
+                channelId: 'pulse_notifications',
+            });
+
+            const req = https.request({
+                hostname: 'exp.host',
+                path: '/--/api/v2/push/send',
+                method: 'POST',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(payload),
+                },
+            }, (res) => {
+                let body = '';
+                res.on('data', chunk => body += chunk);
+                res.on('end', () => {
+                    try {
+                        const result = JSON.parse(body);
+                        if (result.data && result.data.status === 'ok') {
+                            console.log('✅ Expo push sent:', result.data.id);
+                            resolve({ success: true, messageId: result.data.id });
+                        } else if (result.data && result.data.status === 'error') {
+                            console.error('❌ Expo push error:', result.data.message);
+                            const isInvalid = result.data.details?.error === 'DeviceNotRegistered';
+                            resolve({ success: false, invalidToken: isInvalid, error: result.data.message });
+                        } else {
+                            console.log('✅ Expo push sent');
+                            resolve({ success: true });
+                        }
+                    } catch (e) {
+                        console.error('❌ Expo push parse error:', e.message);
+                        resolve({ success: false, error: e.message });
+                    }
+                });
+            });
+
+            req.on('error', (error) => {
+                console.error('❌ Expo push request error:', error.message);
+                resolve({ success: false, error: error.message });
+            });
+
+            req.write(payload);
+            req.end();
+        } catch (error) {
+            console.error('❌ Expo push error:', error.message);
+            resolve({ success: false, error: error.message });
+        }
+    });
+};
+
+/**
+ * Check if a token is an Expo push token
+ */
+const isExpoPushToken = (token) => {
+    return typeof token === 'string' && token.startsWith('ExponentPushToken[');
+};
+
+/**
+ * Send push notification to a specific token (auto-detects Expo vs FCM)
+ * @param {string} token - FCM token or Expo push token
  * @param {Object} notification - { title, body, imageUrl }
  * @param {Object} data - Additional data payload
  * @returns {Promise<Object>}
  */
 const sendToToken = async (token, notification, data = {}) => {
+    // If it's an Expo push token, use Expo's API (no Firebase needed!)
+    if (isExpoPushToken(token)) {
+        return sendViaExpo(token, notification, data);
+    }
+
+    // Otherwise use Firebase Admin for raw FCM tokens
     if (!firebaseInitialized) {
-        console.warn('⚠️ Firebase not initialized, skipping push');
+        console.warn('⚠️ Firebase not initialized and token is not Expo — skipping push');
         return null;
     }
 
@@ -78,7 +159,6 @@ const sendToToken = async (token, notification, data = {}) => {
             },
             data: {
                 ...data,
-                // Ensure all data values are strings
                 click_action: 'FLUTTER_NOTIFICATION_CLICK'
             },
             android: {
@@ -100,12 +180,11 @@ const sendToToken = async (token, notification, data = {}) => {
         };
 
         const response = await admin.messaging().send(message);
-        console.log('✅ Push notification sent:', response);
+        console.log('✅ FCM push notification sent:', response);
         return { success: true, messageId: response };
     } catch (error) {
-        console.error('❌ Push notification error:', error.message);
+        console.error('❌ FCM push notification error:', error.message);
 
-        // If token is invalid, we should remove it
         if (error.code === 'messaging/invalid-registration-token' ||
             error.code === 'messaging/registration-token-not-registered') {
             return { success: false, invalidToken: true, error: error.message };
