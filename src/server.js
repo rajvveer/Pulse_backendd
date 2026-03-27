@@ -10,9 +10,10 @@ const cacheService = require('./services/cacheService');
 const app = require('./app');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
-const jwt = require('jsonwebtoken'); // ✅ ADDED: For socket auth
+const jwt = require('jsonwebtoken');
+const { createAdapter } = require('@socket.io/redis-adapter');
 
-// ✅ ADDED: Import the Chat Realtime Handler
+// Import the Chat Realtime Handler
 const realtimeHandler = require('./sockets/realtime');
 
 const PORT = config.get('server.port');
@@ -31,30 +32,55 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
     credentials: false // Must be false when origin is '*'
   },
-  // ✅ PING/PONG — reclaim dead sockets faster
+  // PING/PONG — reclaim dead sockets faster
   pingTimeout: 20000,     // 20 seconds — detect dead connections sooner
   pingInterval: 25000,    // 25 seconds
 
-  // ✅ TRANSPORT — prefer websocket, fallback to polling
+  // TRANSPORT — prefer websocket, fallback to polling
   transports: ['websocket', 'polling'],
   allowUpgrades: true,
 
-  // ✅ CONNECTION SETTINGS
+  // CONNECTION SETTINGS
   connectTimeout: 60000,  // 60 second connection timeout
 
-  // ✅ BUFFER SETTINGS
+  // BUFFER SETTINGS
   maxHttpBufferSize: 1e6, // 1MB max message size
 
-  // ✅ PERFORMANCE — disable per-message compression (let Express handle it)
+  // PERFORMANCE — disable per-message compression (let Express handle it)
   perMessageDeflate: false,
   httpCompression: false,
 
-  // ✅ RECONNECTION — auto-recover connection state
+  // RECONNECTION — auto-recover connection state
   connectionStateRecovery: {
     maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
     skipMiddlewares: true,
   },
 });
+
+// ✅ Socket.IO Redis Adapter — enables cross-worker event propagation in cluster mode
+// Each worker gets its own Socket.IO instance; the adapter syncs events via Redis pub/sub
+try {
+  const pubClient = cacheService.createClient();
+  const subClient = pubClient.duplicate();
+
+  Promise.all([
+    new Promise((resolve, reject) => {
+      pubClient.on('ready', resolve);
+      pubClient.on('error', reject);
+    }),
+    new Promise((resolve, reject) => {
+      subClient.on('ready', resolve);
+      subClient.on('error', reject);
+    })
+  ]).then(() => {
+    io.adapter(createAdapter(pubClient, subClient));
+    console.log('✅ Socket.IO Redis adapter attached — cluster-safe real-time enabled');
+  }).catch((err) => {
+    console.warn('⚠️  Socket.IO Redis adapter failed — falling back to in-memory (single-worker only):', err.message);
+  });
+} catch (err) {
+  console.warn('⚠️  Socket.IO Redis adapter setup error:', err.message);
+}
 
 // ✅ Socket Authentication Middleware
 // Tries to verify the token, but allows connection even if token is expired.

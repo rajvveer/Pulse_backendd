@@ -98,6 +98,13 @@ const userSchema = new mongoose.Schema({
     }
   },
 
+  // ===== ROLE =====
+  role: {
+    type: String,
+    enum: ['user', 'admin', 'moderator'],
+    default: 'user'
+  },
+
   // ===== ACCOUNT STATUS (EXISTING + ENHANCED) =====
   isActive: {
     type: Boolean,
@@ -261,6 +268,14 @@ const userSchema = new mongoose.Schema({
   },
 
   // ===== SECURITY (EXISTING) =====
+  twoFactorSecret: {
+    type: String,
+    select: false
+  },
+  twoFactorEnabled: {
+    type: Boolean,
+    default: false
+  },
   lastLoginAt: {
     type: Date,
     default: null

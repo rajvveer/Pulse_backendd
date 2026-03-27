@@ -110,10 +110,35 @@ class CacheService {
     }
   }
 
+  // Factory: create a new Redis client with identical connection config.
+  // Used by Socket.IO Redis adapter which needs separate pub/sub clients.
+  createClient() {
+    if (process.env.REDIS_URL) {
+      return new Redis(process.env.REDIS_URL, {
+        maxRetriesPerRequest: 3,
+        enableReadyCheck: true,
+      });
+    }
+    return new Redis({
+      host: process.env.REDIS_HOST || "localhost",
+      port: process.env.REDIS_PORT || 6379,
+      password: process.env.REDIS_PASSWORD || undefined,
+    });
+  }
+
   async disconnect() {
     try {
       await this.redis.quit();
-    } catch {}
+    } catch { }
+  }
+
+  async getStats() {
+    try {
+      const info = await this.redis.info('memory');
+      return { raw: info };
+    } catch {
+      return { error: 'Stats unavailable' };
+    }
   }
 }
 

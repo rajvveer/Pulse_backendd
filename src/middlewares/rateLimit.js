@@ -1,21 +1,27 @@
 const rateLimit = require('express-rate-limit');
+const { RedisStore } = require('rate-limit-redis');
+const cacheService = require('../services/cacheService');
+
+// Shared Redis store — all workers share the same counters
+const redisStore = new RedisStore({
+    sendCommand: (...args) => cacheService.redis.call(...args),
+});
 
 /**
  * Global rate limiter — applied to all routes.
  * 200 requests per 15 minutes per IP.
- * Generous enough for mobile apps doing feed scrolling + API calls.
  */
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 15 * 60 * 1000,
     max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 200,
-    standardHeaders: true,   // Return rate limit info in `RateLimit-*` headers
-    legacyHeaders: false,    // Disable `X-RateLimit-*` headers
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: redisStore,
     message: {
         success: false,
         error: 'Too many requests. Please slow down and try again later.',
         code: 'RATE_LIMIT_EXCEEDED'
     },
-    // Skip rate limiting for health check endpoints
     skip: (req) => req.path === '/health' || req.path === '/health/detailed' || req.path === '/status',
 });
 
@@ -28,6 +34,10 @@ const authLimiter = rateLimit({
     max: 20,
     standardHeaders: true,
     legacyHeaders: false,
+    store: new RedisStore({
+        sendCommand: (...args) => cacheService.redis.call(...args),
+        prefix: 'rl:auth:',
+    }),
     message: {
         success: false,
         error: 'Too many authentication attempts. Please try again later.',
@@ -44,6 +54,10 @@ const uploadLimiter = rateLimit({
     max: 30,
     standardHeaders: true,
     legacyHeaders: false,
+    store: new RedisStore({
+        sendCommand: (...args) => cacheService.redis.call(...args),
+        prefix: 'rl:upload:',
+    }),
     message: {
         success: false,
         error: 'Too many uploads. Please try again later.',

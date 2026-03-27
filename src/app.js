@@ -13,13 +13,29 @@ app.set('trust proxy', true);
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" } // Allow cross-origin requests
 }));
 
-// CORS configuration
+// Debug logger removed to reduce terminal noise
+
+// CORS configuration - ultra relaxed for local dev
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',')
+  : ['http://localhost:5174', 'http://127.0.0.1:5174', 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173'];
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN?.split(',') || '*',
-  credentials: true
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    // Allow anything in local dev
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin']
 }));
+
+// Ensure OPTIONS requests are answered immediately handled by the cors() middleware above
 
 app.use(compression());
 
@@ -66,6 +82,7 @@ app.use('/api/v1/reels', require('./routes/reelRoutes'));
 app.use('/api/v1/groups', require('./routes/groupRoutes'));
 
 // NEW FEATURE ROUTES
+// app.use('/api/v1/admin', require('./routes/adminRoutes'));
 app.use('/api/v1/whispers', require('./routes/whisperRoutes'));
 app.use('/api/v1/pulse-drops', require('./routes/pulseDropRoutes'));
 app.use('/api/v1/chains', require('./routes/chainRoutes'));

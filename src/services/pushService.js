@@ -21,21 +21,25 @@ const initializeFirebase = () => {
         if (serviceAccountPath) {
             // Initialize with service account file
             const serviceAccount = require(serviceAccountPath);
-            admin.initializeApp({
-                credential: admin.credential.cert(serviceAccount),
-                projectId: projectId || serviceAccount.project_id
-            });
+            if (!admin.apps.length) {
+                admin.initializeApp({
+                    credential: admin.credential.cert(serviceAccount),
+                    projectId: projectId || serviceAccount.project_id
+                });
+            }
             console.log('✅ Firebase Admin initialized with service account');
         } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
             // Initialize with environment variables
-            admin.initializeApp({
-                credential: admin.credential.cert({
-                    projectId: process.env.FIREBASE_PROJECT_ID,
-                    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-                    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
-                }),
-                projectId: process.env.FIREBASE_PROJECT_ID
-            });
+            if (!admin.apps.length) {
+                admin.initializeApp({
+                    credential: admin.credential.cert({
+                        projectId: process.env.FIREBASE_PROJECT_ID,
+                        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+                        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
+                    }),
+                    projectId: process.env.FIREBASE_PROJECT_ID
+                });
+            }
             console.log('✅ Firebase Admin initialized with environment variables');
         } else {
             console.warn('⚠️ Firebase not configured - push notifications disabled');
@@ -202,10 +206,6 @@ const sendToToken = async (token, notification, data = {}) => {
  * @returns {Promise<Object>}
  */
 const sendToUser = async (userId, notification, data = {}) => {
-    if (!firebaseInitialized) {
-        return { success: false, reason: 'Firebase not initialized' };
-    }
-
     try {
         const User = require('../models/User');
         const user = await User.findById(userId).select('fcmTokens settings.pushNotifications');

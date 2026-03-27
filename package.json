@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@sentry/node": "^10.15.0",
+    "@socket.io/redis-adapter": "^8.3.0",
     "axios": "^1.12.2",
     "bcryptjs": "^3.0.2",
     "cloudinary": "^2.7.0",
@@ -47,6 +48,9 @@
     "node-geocoder": "^4.4.1",
     "nodemailer": "^7.0.6",
     "nodemailer-brevo-transport": "^2.2.1",
+    "otplib": "^11.0.1",
+    "qrcode": "^1.5.4",
+    "rate-limit-redis": "^4.3.1",
     "sharp": "^0.34.4",
     "socket.io": "^4.8.1",
     "twilio": "^5.10.2",

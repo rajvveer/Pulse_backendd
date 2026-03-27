@@ -39,10 +39,14 @@ class FirebaseConfig {
       };
 
       // Initialize Firebase Admin
-      this.app = admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        projectId: firebaseConfig.projectId
-      });
+      if (!admin.apps.length) {
+        this.app = admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          projectId: firebaseConfig.projectId
+        });
+      } else {
+        this.app = admin.app();
+      }
 
       this.auth = admin.auth();
       this.isInitialized = true;
