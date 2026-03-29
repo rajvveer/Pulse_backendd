@@ -79,56 +79,141 @@ class AuthService {
     throw error;
   }
 }
-async loginWithFirebase(idToken, deviceInfo, ipAddress) {
+async loginWithFirebase(idToken, accessToken, deviceInfo, ipAddress, extraInfo = {}) {
     try {
-      // 1. Verify the token using Firebase Admin SDK
-      // This validates the signature and expiration independently
-      const decodedToken = await firebaseConfig.verifyIdToken(idToken);
-      
-      const { uid, email, phone_number, picture, name, firebase } = decodedToken;
-      
-      // 2. Identify the user
-      // Firebase standardizes phone numbers as +91XXXXXXXXXX
-      const identifier = phone_number || email;
-      const method = phone_number ? 'phone' : 'email';
+      let email, name, picture, googleId;
 
-      if (!identifier) {
-        throw new Error('Firebase account has no email or phone number');
+      // Strategy 1: Try Firebase Admin SDK verification first (works with Firebase ID tokens)
+      let firebaseVerified = false;
+      if (idToken && firebaseConfig.isAvailable()) {
+        try {
+          const decodedToken = await firebaseConfig.verifyIdToken(idToken);
+          email = decodedToken.email;
+          name = decodedToken.name;
+          picture = decodedToken.picture;
+          googleId = decodedToken.uid;
+          firebaseVerified = true;
+          console.log(`🔥 Firebase token verified for: ${email}`);
+        } catch (fbErr) {
+          console.log(`⚠️ Firebase verification failed (expected for Google OAuth tokens): ${fbErr.message}`);
+        }
       }
 
-      console.log(`🔥 Firebase Login: ${method} - ${identifier}`);
+      // Strategy 2: Verify Google access token directly via Google's API
+      // Use the accessToken (OAuth token) which works with Google's userinfo endpoint
+      const googleToken = accessToken || idToken;
+      if (!firebaseVerified && googleToken) {
+        try {
+          const googleResponse = await fetch(
+            `https://www.googleapis.com/oauth2/v3/userinfo`,
+            {
+              headers: { Authorization: `Bearer ${googleToken}` }
+            }
+          );
 
-      // 3. Check if user already exists in YOUR database
-      // We reuse the existing lookup logic to ensure consistency
+          if (googleResponse.ok) {
+            const googleUser = await googleResponse.json();
+            email = googleUser.email;
+            name = googleUser.name;
+            picture = googleUser.picture;
+            googleId = googleUser.sub;
+            console.log(`✅ Google token verified via userinfo API for: ${email}`);
+          } else {
+            // Try tokeninfo endpoint as fallback
+            const tokenInfoResponse = await fetch(
+              `https://oauth2.googleapis.com/tokeninfo?access_token=${googleToken}`
+            );
+            
+            if (tokenInfoResponse.ok) {
+              const tokenInfo = await tokenInfoResponse.json();
+              email = tokenInfo.email;
+              googleId = tokenInfo.sub;
+              // tokeninfo doesn't return name/picture, use extraInfo from frontend
+              name = extraInfo.name;
+              picture = extraInfo.picture;
+              console.log(`✅ Google token verified via tokeninfo API for: ${email}`);
+            } else {
+              throw new Error('Google token verification failed');
+            }
+          }
+        } catch (googleErr) {
+          console.error('❌ Google token verification failed:', googleErr.message);
+          throw new Error('Invalid authentication token');
+        }
+      }
+
+      if (!email) {
+        throw new Error('Could not determine email from authentication token');
+      }
+
+      const identifier = email;
+      const method = 'email';
+
+      console.log(`🔥 Google Login: ${method} - ${identifier}`);
+
+      // Check if user already exists in database
       let user = await User.findByAuthMethod(method, identifier);
 
       if (!user) {
-        // 4. If new user, create them
-        // We reuse your existing createNewUser method so the data structure matches perfectly
-        console.log(`👤 Creating new user from Firebase: ${identifier}`);
+        console.log(`👤 Creating new user from Google: ${identifier}`);
         
-        // Pass a dummy OTP result since Firebase already verified them
         user = await this.createNewUser(method, identifier, { 
           verified: true,
-          via: 'firebase'
+          via: 'google'
         });
 
-        // Optional: Update profile with Google/Firebase info if available
+        // Update profile with Google info
+        if (picture && !user.avatar) user.avatar = picture;
+        if (name && !user.name) user.name = name;
+        if (googleId) user.googleId = googleId;
+        await user.save();
+      } else {
+        await this.updateUserAuthMethod(user, method, identifier);
+        // Update Google profile info if newer
         if (picture && !user.avatar) user.avatar = picture;
         if (name && !user.name) user.name = name;
         await user.save();
-      } else {
-        // 5. If existing user, ensure this auth method is marked as verified
-        // This handles the case where a user signed up via Custom OTP but now logs in via Google
-        await this.updateUserAuthMethod(user, method, identifier);
       }
 
-      // 6. Create Session
-      // This is the convergence point: generate the exact same tokens as your OTP flow
-      return await this.createUserSession(user, deviceInfo, ipAddress);
+      // Check if user needs to create username (new users from Google)
+      if (!user.username) {
+        const tempToken = jwtService.generateTempToken({
+          userId: user._id,
+          purpose: 'username_creation'
+        });
+
+        return {
+          success: true,
+          nextStep: 'create_username',
+          requiresUsername: true,
+          tempToken,
+          user: {
+            id: user._id,
+            name: user.name,
+            email: user.email,
+            avatar: user.avatar,
+            isVerified: user.isVerified
+          },
+          message: 'Please create a username and password'
+        };
+      }
+
+      // Create Session — same tokens as OTP flow
+      const sessionResult = await this.createUserSession(user, deviceInfo, ipAddress);
+      
+      return {
+        success: true,
+        nextStep: 'complete',
+        user: this.sanitizeUser(user),
+        accessToken: sessionResult.tokens.accessToken,
+        refreshToken: sessionResult.tokens.refreshToken,
+        tokens: sessionResult.tokens,
+        session: sessionResult.session,
+        message: 'Authentication successful'
+      };
 
     } catch (error) {
-      console.error('Firebase login service error:', error.message);
+      console.error('Google login service error:', error.message);
       throw error;
     }
   }

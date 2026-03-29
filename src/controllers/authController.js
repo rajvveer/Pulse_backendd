@@ -400,15 +400,16 @@ const logout = async (req, res) => {
   }
 };
 
-// Handle Firebase Login
+// Handle Firebase/Google Login
 const firebaseLogin = async (req, res) => {
   try {
-    const { idToken, deviceId, platform, deviceName } = req.body;
+    const { idToken, accessToken: googleAccessToken, deviceId, platform, deviceName, email, name, picture, googleId } = req.body;
 
-    if (!idToken || !deviceId) {
+    // Need at least one token and a device ID
+    if ((!idToken && !googleAccessToken) || !deviceId) {
       return res.status(400).json({
         success: false,
-        error: 'Firebase ID token and Device ID are required',
+        error: 'Authentication token and Device ID are required',
         code: 'MISSING_FIELDS'
       });
     }
@@ -419,20 +420,24 @@ const firebaseLogin = async (req, res) => {
       deviceName: deviceName || 'Unknown'
     };
 
-    // Call the NEW service method
+    // Pass extra info from frontend as fallback for token verification
+    const extraInfo = { email, name, picture, googleId };
+
+    // Call the service method — pass both tokens so it can try different strategies
     const result = await authService.loginWithFirebase(
       idToken,
+      googleAccessToken,
       deviceInfo,
-      req.ip || '127.0.0.1'
+      req.ip || '127.0.0.1',
+      extraInfo
     );
 
     res.json(result);
 
   } catch (error) {
-    console.error('Firebase login controller error:', error.message);
+    console.error('Google login controller error:', error.message);
     
-    // Handle specific Firebase errors cleanly
-    if (error.message.includes('Firebase ID token has expired')) {
+    if (error.message.includes('expired')) {
       return res.status(401).json({
         success: false,
         error: 'Session expired. Please login again.',
@@ -442,7 +447,7 @@ const firebaseLogin = async (req, res) => {
 
     res.status(401).json({
       success: false,
-      error: 'Authentication failed',
+      error: error.message || 'Authentication failed',
       code: 'AUTH_FAILED'
     });
   }
