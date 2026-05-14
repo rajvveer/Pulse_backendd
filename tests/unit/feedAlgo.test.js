@@ -95,7 +95,7 @@ describe('feedAlgo', () => {
         });
 
         it('should filter old posts with low engagement', () => {
-            const oldDate = new Date(Date.now() - 48 * 3600000);
+            const oldDate = new Date(Date.now() - 168 * 3600000); // 7 days old (> 120h gate)
             const posts = [{ createdAt: oldDate, stats: { likes: 0, comments: 0, shares: 0 } }];
             expect(feedAlgo.applyQualityGate(posts).length).toBe(0);
         });

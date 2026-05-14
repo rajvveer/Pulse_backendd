@@ -21,9 +21,33 @@ class AuthMiddleware {
       // Verify token
       const decoded = jwtService.verifyAccessToken(token);
       
-      // Check user exists and is active
-      const user = await User.findById(decoded.userId);
-      if (!user || !user.isActive) {
+      // Check user exists — use Redis cache to avoid DB hit on every request
+      const cacheKey = `auth_user:${decoded.userId}`;
+      let userActive = null;
+
+      try {
+        const cached = await cacheService.get(cacheKey);
+        if (cached !== null) {
+          userActive = cached === 'true' || cached === true;
+        }
+      } catch (cacheErr) {
+        // Redis down — fall through to DB
+      }
+
+      if (userActive === null) {
+        // Cache miss — check database
+        const user = await User.findById(decoded.userId).select('isActive').lean();
+        userActive = !!(user && user.isActive);
+        
+        // Cache the result for 5 minutes
+        try {
+          await cacheService.set(cacheKey, String(userActive), 300);
+        } catch (cacheErr) {
+          // Redis down — continue without caching
+        }
+      }
+
+      if (!userActive) {
         return res.status(401).json({
           success: false,
           error: 'User not found or inactive',
@@ -31,7 +55,7 @@ class AuthMiddleware {
         });
       }
 
-      // Attach user info to request
+      // Attach user info to request (from JWT — no DB needed)
       req.user = {
         userId: decoded.userId,
         username: decoded.username,

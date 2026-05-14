@@ -25,12 +25,22 @@ config.printSummary();
 // Create HTTP server
 const server = createServer(app);
 
+// Allowed origins for Socket.IO (same policy as Express CORS)
+const socketAllowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',')
+  : ['http://localhost:5174', 'http://127.0.0.1:5174', 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173'];
+
 // Initialize Socket.IO with production-ready settings
 const io = new Server(server, {
   cors: {
-    origin: '*', // Allow all origins — required for mobile app connections
+    origin: function (origin, callback) {
+      // Mobile apps don't send Origin — allow them
+      if (!origin) return callback(null, true);
+      if (socketAllowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error('Not allowed by CORS'), false);
+    },
     methods: ["GET", "POST"],
-    credentials: false // Must be false when origin is '*'
+    credentials: true
   },
   // PING/PONG — reclaim dead sockets faster
   pingTimeout: 20000,     // 20 seconds — detect dead connections sooner
@@ -82,23 +92,26 @@ try {
   console.warn('⚠️  Socket.IO Redis adapter setup error:', err.message);
 }
 
-// ✅ Socket Authentication Middleware
-// Tries to verify the token, but allows connection even if token is expired.
-// The 'user-online' event will set socket.userId with a fresh identity.
+// ✅ Socket Authentication Middleware — SECURED
+// Reject connections without a valid JWT. The frontend must provide a valid
+// access token at connection time. If the token expires, the client should
+// disconnect and reconnect with a fresh token (handled by socket.js updateToken).
 io.use((socket, next) => {
-  if (socket.handshake.auth && socket.handshake.auth.token) {
-    try {
-      const token = socket.handshake.auth.token;
-      const decoded = jwt.verify(token, config.get('jwt.secret') || process.env.JWT_SECRET);
-      socket.userId = decoded.userId;
-    } catch (err) {
-      // ✅ FIX: Don't reject the connection — allow it without userId.
-      // The 'user-online' event will identify the user once the app
-      // refreshes its HTTP token and re-emits 'user-online'.
-      console.warn('Socket Auth Warning:', err.message, '— allowing connection without userId');
-    }
+  const token = socket.handshake.auth?.token;
+
+  if (!token) {
+    console.warn('⛔ Socket connection rejected — no auth token provided');
+    return next(new Error('Authentication required'));
   }
-  next();
+
+  try {
+    const decoded = jwt.verify(token, config.get('jwt.secret') || process.env.JWT_SECRET);
+    socket.userId = decoded.userId;
+    next();
+  } catch (err) {
+    console.warn(`⛔ Socket connection rejected — ${err.message}`);
+    return next(new Error('Authentication failed: ' + err.message));
+  }
 });
 
 // Initialization function
@@ -170,19 +183,21 @@ io.on('connection', (socket) => {
 
   // Location-based room joining
   socket.on('join-location', (location) => {
+    if (!location?.lat || !location?.lng) return;
     const locationRoom = `location_${Math.round(location.lat * 1000)}_${Math.round(location.lng * 1000)}`;
     socket.join(locationRoom);
     console.log(`📍 User ${socket.id} joined location: ${locationRoom}`);
   });
 
-  // User presence
-  socket.on('user-online', (userId) => {
-    socket.userId = userId;
-    socket.join(`user_${userId}`);
-    io.emit('user-status', { userId, status: 'online' });
+  // User presence — uses the AUTHENTICATED userId from JWT, never client-supplied
+  socket.on('user-online', () => {
+    if (!socket.userId) return;
+    socket.join(`user_${socket.userId}`);
+    io.emit('user-status', { userId: socket.userId, status: 'online' });
   });
 
   socket.on('user-typing', (data) => {
+    if (!data?.room) return;
     socket.to(data.room).emit('user-typing', {
       userId: socket.userId,
       isTyping: data.isTyping

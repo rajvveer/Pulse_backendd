@@ -4,11 +4,25 @@ const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
 const crypto = require('crypto');
+const Sentry = require('@sentry/node');
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
+const logger = require('./utils/logger');
 const { globalLimiter } = require('./middlewares/rateLimit');
+const { sanitizeBody } = require('./middlewares/sanitize');
 
+// Initialize Sentry for production error tracking
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'development',
+    tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.2 : 1.0,
+  });
+  console.log('✅ Sentry error tracking initialized');
+}
 const app = express();
 
-app.set('trust proxy', true);
+app.set('trust proxy', 1); // Trust 1 proxy hop (Railway/Heroku). Avoids rate-limit bypass via IP spoofing.
 
 // Security middleware
 app.use(helmet({
@@ -18,17 +32,27 @@ app.use(helmet({
 
 // Debug logger removed to reduce terminal noise
 
-// CORS configuration - ultra relaxed for local dev
+// CORS configuration — secure for production
+// Mobile apps don't send Origin headers, so they pass through naturally.
+// Web origins are checked against a whitelist to prevent cross-site attacks.
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',')
   : ['http://localhost:5174', 'http://127.0.0.1:5174', 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173'];
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
+    // Allow requests with no origin — this is how mobile apps (React Native) work.
+    // Native HTTP clients don't send the Origin header, so this is safe.
     if (!origin) return callback(null, true);
-    // Allow anything in local dev
-    return callback(null, true);
+
+    // Check web origins against whitelist
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // Reject unknown web origins
+    logger.warn(`CORS blocked request from origin: ${origin}`);
+    return callback(new Error('Not allowed by CORS'), false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -52,6 +76,18 @@ if (process.env.NODE_ENV === 'production') {
 // Body parsing middleware (10MB — media uploads go through multer/Cloudinary)
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// XSS Sanitization — clean all user input to prevent stored XSS attacks
+app.use(sanitizeBody);
+
+// Pagination cap — prevent clients from requesting absurd page sizes
+app.use((req, res, next) => {
+  if (req.query.limit) {
+    const parsed = parseInt(req.query.limit);
+    req.query.limit = String(Math.min(Math.max(parsed || 20, 1), 100));
+  }
+  next();
+});
 
 // Request metadata middleware
 app.use((req, res, next) => {
@@ -98,7 +134,16 @@ app.use('/api/v1/referral', require('./routes/referralRoutes'));
 // Open Graph share routes (public — no auth, crawlers need access)
 app.use('/share', require('./routes/ogRoutes'));
 
-
+// Swagger API Documentation (available at /api-docs)
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  customCss: '.swagger-ui .topbar { display: none }',
+  customSiteTitle: 'Pulse API Documentation'
+}));
+// JSON spec endpoint for tooling
+app.get('/api-docs.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(swaggerSpec);
+});
 // 404 handler
 app.use((req, res, next) => {
   res.status(404).json({
@@ -112,7 +157,7 @@ app.use((req, res, next) => {
 
 // Global error handler
 app.use((error, req, res, next) => {
-  console.error(`[${req.requestId || 'unknown'}] Global Error:`, error);
+  logger.error(`[${req.requestId || 'unknown'}] Global Error:`, error);
 
   if (error.name === 'ValidationError') {
     const errors = Object.values(error.errors).map(e => e.message);

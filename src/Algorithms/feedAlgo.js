@@ -25,7 +25,7 @@ const CONFIG = {
     FATIGUE: { MAX_SAME_AUTHOR_IN_BATCH: 5, TOPIC_SATURATION_THRESHOLD: 0.7, TOPIC_FATIGUE_PENALTY: 0.8 },  // much more lenient
     NEGATIVE_SIGNALS: { SKIP_PENALTY: 0.85, HIDE_PENALTY: 0.5, UNFOLLOW_AUTHOR_PENALTY: 0.3 },  // softer penalties
     COLD_START: { MIN_INTERACTIONS: 30, TRENDING_WEIGHT: 2.0, VERIFIED_BOOST: 1.4 },  // less aggressive cold start
-    QUALITY_GATE: { MIN_ENGAGEMENT_OLD_POSTS: 0, OLD_POST_AGE_HOURS: 120 },  // 0 engagement OK, gate at 5 days (was 48h)
+    QUALITY_GATE: { MIN_ENGAGEMENT_OLD_POSTS: 1, OLD_POST_AGE_HOURS: 120 },  // filter zero-engagement posts older than 5 days
     FEEDBACK: { POSITIVE_BOOST: 1.2, NEGATIVE_DAMPEN: 0.8 }  // gentler feedback loop
 };
 

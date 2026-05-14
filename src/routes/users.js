@@ -10,6 +10,12 @@ router.get('/search', verifyAccessToken, userController.searchUsers);
 // Get current user profile
 router.get('/me', verifyAccessToken, userController.getCurrentUser);
 
+// Account management — keep these BEFORE the /:username routes so the
+// literal "me" / "me/..." paths aren't swallowed by the param matcher.
+router.patch('/me/password', verifyAccessToken, userController.changePassword);
+router.delete('/me', verifyAccessToken, userController.deleteAccount);
+router.get('/me/blocked', verifyAccessToken, userController.getBlockedUsers);
+
 // Get user profile by username
 router.get('/:username', verifyAccessToken, userController.getUserByUsername);
 
@@ -24,6 +30,10 @@ router.post('/me/avatar', verifyAccessToken, upload.single('avatar'), userContro
 
 // Follow/Unfollow user
 router.post('/:username/follow', verifyAccessToken, userController.toggleFollow);
+
+// Block/Unblock user
+router.post('/:username/block', verifyAccessToken, userController.blockUser);
+router.delete('/:username/block', verifyAccessToken, userController.unblockUser);
 
 // Get lists
 router.get('/:username/followers', verifyAccessToken, userController.getFollowers);
