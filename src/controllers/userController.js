@@ -182,11 +182,28 @@ exports.toggleFollow = async (req, res) => {
 
     // Atomic toggle using Follow collection
     const { followed, followerCount } = await Follow.toggleFollow(currentUserId, targetUser._id);
-
-    // Sync cached stats on User document
-    await User.findByIdAndUpdate(targetUser._id, { 'stats.followers': followerCount });
     const followingCount = await Follow.getFollowingCount(currentUserId);
-    await User.findByIdAndUpdate(currentUserId, { 'stats.following': followingCount });
+
+    // Dual-write to the legacy User.followers / User.following arrays so the
+    // feed controllers (which still read those arrays) stay in sync, and update
+    // the cached stats counters in the same operation.
+    const targetArrayOp = followed
+      ? { $addToSet: { followers: currentUserId } }
+      : { $pull: { followers: currentUserId } };
+    const currentArrayOp = followed
+      ? { $addToSet: { following: targetUser._id } }
+      : { $pull: { following: targetUser._id } };
+
+    await Promise.all([
+      User.findByIdAndUpdate(targetUser._id, {
+        ...targetArrayOp,
+        $set: { 'stats.followers': followerCount }
+      }),
+      User.findByIdAndUpdate(currentUserId, {
+        ...currentArrayOp,
+        $set: { 'stats.following': followingCount }
+      })
+    ]);
 
     // Create follow notification
     if (followed) {

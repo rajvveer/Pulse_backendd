@@ -2,6 +2,7 @@ const Post = require('../models/Post');
 const User = require('../models/User');
 const Comment = require('../models/Comment');
 const Like = require('../models/Like');
+const Bookmark = require('../models/Bookmark');
 const UserBehavior = require('../models/UserBehavior');
 const UserEngagement = require('../models/UserEngagement');
 const Notification = require('../models/Notification');
@@ -94,12 +95,15 @@ exports.getPost = async (req, res) => {
     const postObj = maskAnonymousPost(post);
 
     // Use Like model for consistency with feed
-    const isLiked = await Like.isLikedBy(req.user.userId, 'post', postId);
-    const likeCount = await Like.getLikeCount('post', postId);
+    const [isLiked, likeCount, bookmarkDoc] = await Promise.all([
+      Like.isLikedBy(req.user.userId, 'post', postId),
+      Like.getLikeCount('post', postId),
+      Bookmark.findOne({ user: req.user.userId, itemId: postId, itemType: 'post' }).lean()
+    ]);
 
     res.json({
       success: true,
-      data: { ...postObj, isLiked, likesCount: likeCount }
+      data: { ...postObj, isLiked, likesCount: likeCount, isBookmarked: !!bookmarkDoc }
     });
   } catch (error) {
     console.error('Get post error:', error.message);
