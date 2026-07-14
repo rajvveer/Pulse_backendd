@@ -15,10 +15,23 @@ class DatabaseConfig {
 
       const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/pulse';
 
+      // Pool sizing must respect the Atlas connection cap:
+      //   total connections ≈ maxPoolSize × workers/container × containers.
+      // In cluster mode every worker opens its OWN pool, so a flat 50 silently
+      // multiplies (50 × 8 workers × 20 containers = 8,000 — well past an M30).
+      // We derive a per-PROCESS pool from a cluster-wide target divided by the
+      // worker count, so adding workers doesn't inflate the total per container.
+      const workersPerContainer = parseInt(process.env.CLUSTER_WORKERS) || require('os').cpus().length || 1;
+      const explicitPool = parseInt(process.env.MONGO_OPTIONS_MAX_POOL_SIZE);
+      // Per-container connection budget (tune to your Atlas tier ÷ max containers).
+      const containerPoolBudget = parseInt(process.env.MONGO_CONTAINER_POOL_BUDGET) || 50;
+      const derivedPerWorker = Math.max(5, Math.floor(containerPoolBudget / workersPerContainer));
+      const maxPoolSize = explicitPool || derivedPerWorker;
+
       const options = {
-        // Connection pool — sized for high concurrency per worker
-        maxPoolSize: parseInt(process.env.MONGO_OPTIONS_MAX_POOL_SIZE) || 50,
-        minPoolSize: parseInt(process.env.MONGO_OPTIONS_MIN_POOL_SIZE) || 5,
+        // Connection pool — see sizing note above.
+        maxPoolSize,
+        minPoolSize: parseInt(process.env.MONGO_OPTIONS_MIN_POOL_SIZE) || Math.min(2, maxPoolSize),
         maxIdleTimeMS: 30000,
 
         // Timeouts
@@ -38,6 +51,7 @@ class DatabaseConfig {
       console.log('✅ Connected to MongoDB successfully');
       console.log(`📍 Database: ${mongoose.connection.name}`);
       console.log(`🌐 Host: ${mongoose.connection.host}:${mongoose.connection.port}`);
+      console.log(`🔗 Mongo pool: maxPoolSize=${maxPoolSize} per process (×${workersPerContainer} workers/container)`);
 
       // Handle connection events
       mongoose.connection.on('error', (error) => {
@@ -107,9 +121,20 @@ class DatabaseConfig {
   async createIndexes() {
     try {
       console.log('📝 Creating database indexes...');
-      const collections = mongoose.connection.collections;
 
-      for (const [name, collection] of Object.entries(collections)) {
+      // Actually build every schema-defined index. Model.createIndexes() is
+      // additive (unlike syncIndexes, it never drops indexes created by
+      // scripts/createIndexes.js), and is a no-op for indexes that exist.
+      const modelNames = mongoose.modelNames();
+      for (const name of modelNames) {
+        try {
+          await mongoose.model(name).createIndexes();
+        } catch (err) {
+          console.error(`❌ Index build failed for ${name}:`, err.message);
+        }
+      }
+
+      for (const [name, collection] of Object.entries(mongoose.connection.collections)) {
         const indexes = await collection.listIndexes().toArray();
         console.log(`📊 ${name} has ${indexes.length} indexes`);
       }

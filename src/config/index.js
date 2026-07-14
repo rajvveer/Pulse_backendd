@@ -14,6 +14,13 @@ class Config {
       'TEMP_JWT_SECRET'
     ];
 
+    // In production there is no acceptable fallback for these: a missing
+    // MONGO_URI would silently connect to localhost, and a missing
+    // SESSION_SECRET would fall back to a publicly-known string.
+    if (process.env.NODE_ENV === 'production') {
+      required.push('MONGO_URI', 'SESSION_SECRET');
+    }
+
     const missing = required.filter(key => !process.env[key]);
 
     if (missing.length > 0) {
@@ -25,6 +32,11 @@ class Config {
       } else {
         console.warn('⚠️  Continuing in development mode with missing env vars');
       }
+    }
+
+    if (process.env.NODE_ENV === 'production' && !process.env.REDIS_URL && !process.env.REDIS_HOST) {
+      console.error('❌ REDIS_URL or REDIS_HOST must be set in production (rate limiting and caching depend on Redis)');
+      process.exit(1);
     }
   }
 
@@ -63,7 +75,8 @@ class Config {
       // Security Configuration
       security: {
         bcryptSaltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS) || 12,
-        sessionSecret: process.env.SESSION_SECRET || 'fallback-session-secret'
+        // Dev-only fallback; validateRequiredEnvVars enforces this in production
+        sessionSecret: process.env.SESSION_SECRET || 'dev-only-session-secret'
       },
 
       // Custom OTP Service
