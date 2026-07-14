@@ -70,6 +70,12 @@ function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// Resolve the public base URL from env, falling back to the request host so
+// links work in any environment without a hardcoded deployment URL.
+function getServerUrl(req) {
+    return process.env.SERVER_URL || `${req.protocol}://${req.get('host')}`;
+}
+
 // ---------------------------------------------------------------------------
 // GET /share/post/:postId
 // ---------------------------------------------------------------------------
@@ -79,16 +85,23 @@ exports.sharePost = async (req, res) => {
             .populate('author', 'username profile.displayName profile.avatar')
             .lean();
 
-        if (!post) {
+        // This route is public — only ever render active, public posts
+        if (!post || post.isActive === false || (post.visibility && post.visibility !== 'public')) {
             return res.status(404).send('Post not found');
         }
 
-        const authorName = post.author?.profile?.displayName || post.author?.username || 'Someone';
-        const description = post.content
-            ? post.content.substring(0, 200)
+        const authorName = post.isAnonymous
+            ? 'Someone'
+            : post.author?.profile?.displayName || post.author?.username || 'Someone';
+        const text = typeof post.content === 'string' ? post.content : post.content?.text;
+        const description = text
+            ? text.substring(0, 200)
             : `Check out this post by ${authorName} on Pulse`;
-        const image = post.media?.[0]?.url || post.author?.profile?.avatar || '';
-        const serverUrl = process.env.SERVER_URL || 'https://pulsebackendd-production-1d87.up.railway.app';
+        const image = post.content?.media?.[0]?.url
+            || post.media?.[0]?.url
+            || (post.isAnonymous ? '' : post.author?.profile?.avatar)
+            || '';
+        const serverUrl = getServerUrl(req);
 
         const html = renderOGPage({
             title: `${authorName} on Pulse`,
@@ -121,9 +134,11 @@ exports.shareProfile = async (req, res) => {
         }
 
         const displayName = user.profile?.displayName || user.username;
-        const bio = user.profile?.bio || `Follow ${displayName} on Pulse`;
+        // Don't expose bio for private accounts on a public, unauthenticated page
+        const isPrivate = !!user.privacy?.isPrivate;
+        const bio = (!isPrivate && user.profile?.bio) || `Follow ${displayName} on Pulse`;
         const avatar = user.profile?.avatar || '';
-        const serverUrl = process.env.SERVER_URL || 'https://pulsebackendd-production-1d87.up.railway.app';
+        const serverUrl = getServerUrl(req);
 
         const html = renderOGPage({
             title: `${displayName} (@${user.username}) — Pulse`,
@@ -160,7 +175,7 @@ exports.shareReel = async (req, res) => {
             ? reel.caption.substring(0, 200)
             : `Watch this reel by ${authorName} on Pulse`;
         const thumbnail = reel.thumbnailUrl || reel.author?.profile?.avatar || '';
-        const serverUrl = process.env.SERVER_URL || 'https://pulsebackendd-production-1d87.up.railway.app';
+        const serverUrl = getServerUrl(req);
 
         const html = renderOGPage({
             title: `${authorName}'s Reel — Pulse`,

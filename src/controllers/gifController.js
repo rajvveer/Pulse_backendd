@@ -1,11 +1,19 @@
 const axios = require('axios');
 
-const TENOR_API_KEY = process.env.TENOR_API_KEY || "AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ"
+const TENOR_API_KEY = process.env.TENOR_API_KEY;
 const TENOR_CLIENT_KEY = process.env.TENOR_CLIENT_KEY || 'pulse_app';
 const TENOR_BASE_URL = 'https://tenor.googleapis.com/v2';
 
+// Returns true if GIF features are usable; otherwise responds 503.
+const ensureConfigured = (res) => {
+  if (TENOR_API_KEY) return true;
+  res.status(503).json({ success: false, message: 'GIF service is not configured' });
+  return false;
+};
+
 // Search GIFs
 exports.searchGifs = async (req, res) => {
+  if (!ensureConfigured(res)) return;
   try {
     const { q, limit = 20 } = req.query;
 
@@ -53,6 +61,7 @@ exports.searchGifs = async (req, res) => {
 
 // Get trending/featured GIFs
 exports.getTrendingGifs = async (req, res) => {
+  if (!ensureConfigured(res)) return;
   try {
     const { limit = 20 } = req.query;
 
@@ -92,6 +101,7 @@ exports.getTrendingGifs = async (req, res) => {
 
 // Get GIF categories
 exports.getCategories = async (req, res) => {
+  if (!ensureConfigured(res)) return;
   try {
     const response = await axios.get(`${TENOR_BASE_URL}/categories`, {
       params: {

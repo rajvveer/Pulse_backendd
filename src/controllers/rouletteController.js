@@ -1,5 +1,7 @@
 const Roulette = require('../models/Roulette');
 const User = require('../models/User');
+const Follow = require('../models/Follow');
+const cacheService = require('../services/cacheService');
 
 // =========================================================
 //  JOIN QUEUE
@@ -152,23 +154,35 @@ exports.decide = async (req, res) => {
             const otherUserId = session.users.find(u => u.user.toString() !== userId)?.user;
             if (otherUserId) {
                 try {
-                    // Mutual follow — both follow each other
-                    await User.findByIdAndUpdate(userId, {
-                        $addToSet: { following: otherUserId },
-                        $inc: { 'stats.following': 1 }
-                    });
-                    await User.findByIdAndUpdate(otherUserId, {
-                        $addToSet: { followers: userId },
-                        $inc: { 'stats.followers': 1 }
-                    });
-                    await User.findByIdAndUpdate(otherUserId, {
-                        $addToSet: { following: userId },
-                        $inc: { 'stats.following': 1 }
-                    });
-                    await User.findByIdAndUpdate(userId, {
-                        $addToSet: { followers: otherUserId },
-                        $inc: { 'stats.followers': 1 }
-                    });
+                    // Mutual follow — both follow each other, via the dedicated
+                    // Follow collection (idempotent: the unique index + Follow
+                    // create makes a repeat connect a no-op, not a duplicate or
+                    // a runaway stat increment). No embedded array writes.
+                    await Promise.all([
+                        Follow.create({ follower: userId, following: otherUserId }).catch(e => {
+                            if (e.code !== 11000) throw e;
+                        }),
+                        Follow.create({ follower: otherUserId, following: userId }).catch(e => {
+                            if (e.code !== 11000) throw e;
+                        })
+                    ]);
+
+                    // Reconcile the cached counters from the source of truth.
+                    const [uF, uG, oF, oG] = await Promise.all([
+                        Follow.getFollowerCount(userId),
+                        Follow.getFollowingCount(userId),
+                        Follow.getFollowerCount(otherUserId),
+                        Follow.getFollowingCount(otherUserId)
+                    ]);
+                    await Promise.all([
+                        User.updateOne({ _id: userId }, { $set: { 'stats.followers': uF, 'stats.following': uG } }),
+                        User.updateOne({ _id: otherUserId }, { $set: { 'stats.followers': oF, 'stats.following': oG } })
+                    ]);
+
+                    cacheService.del(`followgraph:${userId}`).catch(() => {});
+                    cacheService.del(`followgraph:${otherUserId}`).catch(() => {});
+                    cacheService.del(`reel:following:${userId}`).catch(() => {});
+                    cacheService.del(`reel:following:${otherUserId}`).catch(() => {});
                 } catch (e) {
                     console.error('[Roulette] Follow creation error:', e);
                 }

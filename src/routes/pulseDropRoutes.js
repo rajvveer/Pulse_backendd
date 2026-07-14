@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const pulseDropController = require('../controllers/pulseDropController');
-const { verifyAccessToken } = require('../middlewares/auth');
+const auth = require('../middlewares/auth');
+const { verifyAccessToken } = auth;
 
 // All routes require auth
 router.use(verifyAccessToken);
@@ -22,6 +23,6 @@ router.post('/:dropId/respond', pulseDropController.createResponse);
 router.get('/:dropId/responses', pulseDropController.getResponses);
 
 // Admin: Create drop manually
-router.post('/create', pulseDropController.createDrop);
+router.post('/create', auth.requireAdmin.bind(auth), pulseDropController.createDrop);
 
 module.exports = router;
