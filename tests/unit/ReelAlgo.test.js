@@ -6,7 +6,8 @@ jest.mock('../../src/models/UserEngagement', () => ({
     getBatchAffinities: jest.fn().mockResolvedValue(new Map())
 }));
 jest.mock('../../src/models/Like', () => ({
-    getLikeVelocity: jest.fn().mockResolvedValue(0)
+    getLikeVelocity: jest.fn().mockResolvedValue(0),
+    getBatchLikeVelocities: jest.fn().mockResolvedValue(new Map())
 }));
 
 const ReelAlgo = require('../../src/Algorithms/ReelAlgo');

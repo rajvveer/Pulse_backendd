@@ -7,6 +7,7 @@ jest.mock('../../src/models/UserEngagement', () => ({
 }));
 jest.mock('../../src/models/Like', () => ({
     getLikeVelocity: jest.fn().mockResolvedValue(0),
+    getBatchLikeVelocities: jest.fn().mockResolvedValue(new Map()),
     find: jest.fn().mockReturnValue({ select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([]) }) })
 }));
 jest.mock('../../src/models/UserBehavior', () => ({
