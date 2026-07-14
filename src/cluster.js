@@ -54,11 +54,15 @@ if (cluster.isPrimary) {
             cluster.workers[id].process.kill(signal);
         }
 
-        // Force exit after 10s
+        // Force exit AFTER the worker's own graceful-drain budget. Each worker
+        // (server.js) may take up to SHUTDOWN_FORCE_MS (default 30s) to drain
+        // sockets + close deps; the master must outlast that, or it would
+        // SIGKILL workers mid-drain. Give a small buffer on top.
+        const workerForceMs = parseInt(process.env.SHUTDOWN_FORCE_MS) || 30000;
         setTimeout(() => {
-            console.error('⏰ Forced shutdown after 10 seconds');
+            console.error('⏰ Forced shutdown after worker drain timeout');
             process.exit(1);
-        }, 10000);
+        }, workerForceMs + 5000);
     };
 
     process.on('SIGTERM', () => shutdown('SIGTERM'));
