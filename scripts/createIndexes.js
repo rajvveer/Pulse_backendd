@@ -11,7 +11,12 @@ require('dotenv').config();
 const createIndexes = async () => {
     try {
         console.log('🔧 Connecting to MongoDB...');
-        await mongoose.connect(process.env.MONGODB_URI);
+        // The app uses MONGO_URI; accept MONGODB_URI as a fallback alias
+        const uri = process.env.MONGO_URI || process.env.MONGODB_URI;
+        if (!uri) {
+            throw new Error('MONGO_URI environment variable is required');
+        }
+        await mongoose.connect(uri);
         console.log('✅ Connected to MongoDB');
 
         const db = mongoose.connection.db;
@@ -41,6 +46,18 @@ const createIndexes = async () => {
             { name: 'location_geo_idx', background: true, sparse: true }
         );
 
+        // Full-text search index (replaces un-indexable $regex scans)
+        await db.collection('posts').createIndex(
+            { 'content.text': 'text', 'content.hashtags': 'text' },
+            { name: 'post_text_search', background: true, weights: { 'content.hashtags': 5, 'content.text': 1 } }
+        );
+
+        // Trending window: createdAt range + likes sort
+        await db.collection('posts').createIndex(
+            { isActive: 1, visibility: 1, createdAt: -1, 'stats.likes': -1 },
+            { name: 'trending_idx', background: true }
+        );
+
         console.log('✅ Post indexes created');
 
         // ==========================================
@@ -56,6 +73,12 @@ const createIndexes = async () => {
         await db.collection('users').createIndex(
             { email: 1 },
             { name: 'email_unique_idx', unique: true, sparse: true, background: true }
+        );
+
+        // Full-text search across username / display name / bio
+        await db.collection('users').createIndex(
+            { 'profile.displayName': 'text', username: 'text', 'profile.bio': 'text' },
+            { name: 'user_text_search', background: true }
         );
 
         console.log('✅ User indexes created');
@@ -107,6 +130,45 @@ const createIndexes = async () => {
         console.log('✅ Comment indexes created');
 
         // ==========================================
+        // MESSAGE / CONVERSATION INDEXES
+        // ==========================================
+        console.log('Creating Message/Conversation indexes...');
+
+        // Chat history: equality on conversation + sort by createdAt from index
+        await db.collection('messages').createIndex(
+            { conversation: 1, createdAt: -1 },
+            { name: 'message_history_idx', background: true }
+        );
+
+        // Conversation list: participant match + recent-first from index
+        await db.collection('conversations').createIndex(
+            { participants: 1, lastMessageAt: -1 },
+            { name: 'conversation_list_idx', background: true }
+        );
+
+        console.log('✅ Message/Conversation indexes created');
+
+        // ==========================================
+        // FOLLOW INDEXES
+        // ==========================================
+        console.log('Creating Follow indexes...');
+
+        await db.collection('follows').createIndex(
+            { follower: 1, following: 1 },
+            { name: 'follow_unique_idx', unique: true, background: true }
+        );
+        await db.collection('follows').createIndex(
+            { following: 1, createdAt: -1 },
+            { name: 'followers_of_idx', background: true }
+        );
+        await db.collection('follows').createIndex(
+            { follower: 1, createdAt: -1 },
+            { name: 'following_of_idx', background: true }
+        );
+
+        console.log('✅ Follow indexes created');
+
+        // ==========================================
         // REEL INDEXES
         // ==========================================
         console.log('Creating Reel indexes...');
@@ -127,7 +189,7 @@ const createIndexes = async () => {
 
         // Print index stats
         console.log('📈 Index Statistics:');
-        const collections = ['posts', 'users', 'likes', 'notifications', 'comments', 'reels'];
+        const collections = ['posts', 'users', 'likes', 'notifications', 'comments', 'reels', 'messages', 'conversations', 'follows'];
 
         for (const collName of collections) {
             try {
