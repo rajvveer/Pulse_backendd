@@ -5,6 +5,10 @@ const Notification = require('../models/Notification');
 const bcrypt = require('bcryptjs');
 const cloudinary = require('cloudinary').v2;
 const config = require('../config');
+const escapeRegex = require('../utils/escapeRegex');
+const cacheService = require('../services/cacheService');
+const embeddingService = require('../services/embeddingService');
+const userVectorService = require('../services/userVectorService');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -24,19 +28,42 @@ exports.searchUsers = async (req, res) => {
       return res.json({ success: true, data: [] });
     }
 
-    const searchQuery = q.trim();
+    const term = q.trim().slice(0, 50);
 
-    // Search by username or displayName (case-insensitive)
-    const users = await User.find({
-      $or: [
-        { username: { $regex: searchQuery, $options: 'i' } },
-        { 'profile.displayName': { $regex: searchQuery, $options: 'i' } }
-      ],
-      _id: { $ne: req.user.userId } // Exclude current user
+    // Prefix search by username uses the username index (anchored ^ regex is
+    // index-eligible, unlike a free-floating one). For broader matches we fall
+    // back to the User $text index (username/displayName/bio) — never an
+    // un-anchored $regex, which forces a full collection scan at scale.
+    const safePrefix = escapeRegex(term);
+    let users = await User.find({
+      username: { $regex: `^${safePrefix}`, $options: 'i' },
+      isActive: true,
+      _id: { $ne: req.user.userId }
     })
       .select('username profile.displayName profile.avatar avatar isVerified')
       .limit(20)
       .lean();
+
+    // If the prefix match is thin, augment with full-text relevance results.
+    if (users.length < 20 && term.length >= 2) {
+      const seen = new Set(users.map(u => u._id.toString()));
+      const textUsers = await User.find(
+        {
+          $text: { $search: term },
+          isActive: true,
+          _id: { $ne: req.user.userId }
+        },
+        { score: { $meta: 'textScore' } }
+      )
+        .select('username profile.displayName profile.avatar avatar isVerified')
+        .sort({ score: { $meta: 'textScore' } })
+        .limit(20)
+        .lean();
+      for (const u of textUsers) {
+        if (users.length >= 20) break;
+        if (!seen.has(u._id.toString())) { users.push(u); seen.add(u._id.toString()); }
+      }
+    }
 
     res.json({ success: true, data: users });
   } catch (error) {
@@ -151,13 +178,19 @@ exports.getUserPosts = async (req, res) => {
       query.isAnonymous = false; // ✅ Hide anonymous posts from other users
     }
 
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+
     const posts = await Post.find(query)
       .populate('author', 'username name avatar profile')
-      .sort({ createdAt: -1 }); // Newest first
+      .sort({ createdAt: -1 }) // Newest first
+      .skip((page - 1) * limit)
+      .limit(limit);
 
     res.json({
       success: true,
-      data: posts
+      data: posts,
+      pagination: { page, limit, hasMore: posts.length === limit }
     });
   } catch (error) {
     console.error(error);
@@ -180,30 +213,24 @@ exports.toggleFollow = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Cannot follow yourself' });
     }
 
-    // Atomic toggle using Follow collection
+    // Atomic toggle using the dedicated Follow collection (single-doc insert /
+    // delete — O(1), no document growth, no 16MB cap).
     const { followed, followerCount } = await Follow.toggleFollow(currentUserId, targetUser._id);
     const followingCount = await Follow.getFollowingCount(currentUserId);
 
-    // Dual-write to the legacy User.followers / User.following arrays so the
-    // feed controllers (which still read those arrays) stay in sync, and update
-    // the cached stats counters in the same operation.
-    const targetArrayOp = followed
-      ? { $addToSet: { followers: currentUserId } }
-      : { $pull: { followers: currentUserId } };
-    const currentArrayOp = followed
-      ? { $addToSet: { following: targetUser._id } }
-      : { $pull: { following: targetUser._id } };
-
+    // Maintain ONLY the cached counter stats. The legacy embedded
+    // followers[]/following[] arrays are no longer written — every read path
+    // (feeds, reels, profile) now uses the Follow collection. Writing those
+    // unbounded arrays serialized concurrent follows on a single document and
+    // would blow the 16MB BSON cap for popular accounts.
     await Promise.all([
-      User.findByIdAndUpdate(targetUser._id, {
-        ...targetArrayOp,
-        $set: { 'stats.followers': followerCount }
-      }),
-      User.findByIdAndUpdate(currentUserId, {
-        ...currentArrayOp,
-        $set: { 'stats.following': followingCount }
-      })
+      User.updateOne({ _id: targetUser._id }, { $set: { 'stats.followers': followerCount } }),
+      User.updateOne({ _id: currentUserId }, { $set: { 'stats.following': followingCount } })
     ]);
+
+    // Invalidate cached follow graphs so the change is reflected promptly.
+    cacheService.del(`followgraph:${currentUserId}`).catch(() => {});
+    cacheService.del(`reel:following:${currentUserId}`).catch(() => {});
 
     // Create follow notification
     if (followed) {
@@ -390,8 +417,8 @@ exports.changePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
 
-    if (!newPassword || String(newPassword).length < 6) {
-      return res.status(400).json({ success: false, message: 'New password must be at least 6 characters' });
+    if (!newPassword || String(newPassword).length < 8) {
+      return res.status(400).json({ success: false, message: 'New password must be at least 8 characters' });
     }
 
     const user = await User.findById(req.user.userId).select('+passwordHash');
@@ -528,6 +555,57 @@ exports.getBlockedUsers = async (req, res) => {
     res.json({ success: true, data: user?.blockedUsers || [] });
   } catch (error) {
     console.error('Get blocked users error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+// ==========================================
+// 14. ONBOARDING — interest picker + cold-start taste seed
+// ==========================================
+
+// GET /users/onboarding/options — topics + vibes the picker renders.
+exports.getOnboardingOptions = async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: {
+        topics: embeddingService.TOPIC_KEYS,
+        vibes: embeddingService.VIBES,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// POST /users/onboarding — submit chosen topics/vibes. Builds an immediate
+// taste vector so the user's FIRST feed is personalized (cold-start fix), and
+// persists the picks as topic affinities for durability.
+exports.submitOnboarding = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const topics = Array.isArray(req.body.topics)
+      ? req.body.topics.filter((t) => embeddingService.TOPIC_KEYS.includes(t)).slice(0, 10)
+      : [];
+    const vibes = Array.isArray(req.body.vibes)
+      ? req.body.vibes.filter((v) => embeddingService.VIBES.includes(v)).slice(0, 5)
+      : [];
+
+    if (topics.length === 0 && vibes.length === 0) {
+      return res.status(400).json({ success: false, message: 'Pick at least one topic or vibe' });
+    }
+
+    // Seed the cached taste vector right now (used by feed candidate retrieval).
+    await userVectorService.seedFromOnboarding(userId, { topics, vibes });
+
+    // Persist picks so the vector can be rebuilt after the cache expires.
+    await User.updateOne(
+      { _id: userId },
+      { $set: { 'onboarding.topics': topics, 'onboarding.vibes': vibes, 'onboarding.completedAt': new Date() } }
+    );
+
+    res.json({ success: true, data: { topics, vibes } });
+  } catch (error) {
+    console.error('Onboarding error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

@@ -3,9 +3,14 @@ const router = express.Router();
 const { verifyAccessToken } = require('../middlewares/auth');
 const userController = require('../controllers/userController');
 const upload = require('../middlewares/upload');
+const { uploadLimiter } = require('../middlewares/rateLimit');
 
 // ✅ ADD THIS - Must be FIRST to avoid route conflicts
 router.get('/search', verifyAccessToken, userController.searchUsers);
+
+// Onboarding (cold-start interest picker → immediate personalized feed)
+router.get('/onboarding/options', verifyAccessToken, userController.getOnboardingOptions);
+router.post('/onboarding', verifyAccessToken, userController.submitOnboarding);
 
 // Get current user profile
 router.get('/me', verifyAccessToken, userController.getCurrentUser);
@@ -26,7 +31,7 @@ router.get('/:username/posts', verifyAccessToken, userController.getUserPosts);
 router.patch('/me', verifyAccessToken, userController.updateProfile);
 
 // Upload avatar
-router.post('/me/avatar', verifyAccessToken, upload.single('avatar'), userController.uploadAvatar);
+router.post('/me/avatar', verifyAccessToken, uploadLimiter, upload.uploadGuard, upload.single('avatar'), userController.uploadAvatar);
 
 // Follow/Unfollow user
 router.post('/:username/follow', verifyAccessToken, userController.toggleFollow);

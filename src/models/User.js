@@ -143,15 +143,22 @@ const userSchema = new mongoose.Schema({
     }
   },
 
-  // ===== RELATIONSHIPS (NEW) =====
-  followers: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  }],
-  following: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  }],
+  // ===== RELATIONSHIPS =====
+  // DEPRECATED: followers[]/following[] are NO LONGER written. Follow state
+  // lives in the dedicated, indexed `Follow` collection (O(1) follow/unfollow,
+  // no 16MB document cap, no write contention on popular accounts). These
+  // fields remain only so historical documents deserialize cleanly; do not
+  // read or write them in new code — use the Follow model.
+  followers: {
+    type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    select: false // don't load these potentially-large arrays on every query
+  },
+  following: {
+    type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    select: false
+  },
+  // blockedUsers is still used (Block has no dedicated collection yet). Kept
+  // loadable; bounded in practice by how many users one person blocks.
   blockedUsers: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -348,6 +355,15 @@ const userSchema = new mongoose.Schema({
   referralCount: {
     type: Number,
     default: 0
+  },
+
+  // ===== ONBOARDING (cold-start taste seed) =====
+  // Topics/vibes the user picked at signup, used to build their first
+  // personalized feed before they have any engagement history.
+  onboarding: {
+    topics: [{ type: String }],
+    vibes: [{ type: String }],
+    completedAt: { type: Date, default: null }
   }
 
 }, {
@@ -377,11 +393,12 @@ userSchema.index({ referralCode: 1 }, { unique: true, sparse: true });
 
 // ===== VIRTUAL FIELDS =====
 userSchema.virtual('followerCount').get(function () {
-  return this.followers?.length || this.stats.followers || 0;
+  // Source of truth is the maintained counter (Follow collection drives it).
+  return this.stats?.followers || 0;
 });
 
 userSchema.virtual('followingCount').get(function () {
-  return this.following?.length || this.stats.following || 0;
+  return this.stats?.following || 0;
 });
 
 userSchema.virtual('age').get(function () {
@@ -438,27 +455,35 @@ userSchema.methods.setOnlineStatus = function (isOnline) {
   return this.save();
 };
 
+// NOTE: follow-relationship checks now live in the Follow collection. The
+// async statics there (Follow.isFollowing) are the correct API. These instance
+// helpers are kept only for any legacy caller and are guarded against the
+// now-unselected arrays (which will be undefined on normal queries).
 userSchema.methods.canViewProfile = function (viewerId) {
-  // If profile is public, anyone can view
-  if (!this.privacy.isPrivate) return true;
-
-  // Own profile is always visible
+  if (!this.privacy?.isPrivate) return true;
   if (this._id.toString() === viewerId.toString()) return true;
-
-  // Check if viewer is a follower
-  return this.followers.some(id => id.toString() === viewerId.toString());
+  // Caller must verify follow via Follow.isFollowing; default to deny here.
+  return Array.isArray(this.followers)
+    ? this.followers.some(id => id.toString() === viewerId.toString())
+    : false;
 };
 
 userSchema.methods.isFollowing = function (userId) {
-  return this.following.some(id => id.toString() === userId.toString());
+  return Array.isArray(this.following)
+    ? this.following.some(id => id.toString() === userId.toString())
+    : false;
 };
 
 userSchema.methods.isFollower = function (userId) {
-  return this.followers.some(id => id.toString() === userId.toString());
+  return Array.isArray(this.followers)
+    ? this.followers.some(id => id.toString() === userId.toString())
+    : false;
 };
 
 userSchema.methods.isBlocked = function (userId) {
-  return this.blockedUsers.some(id => id.toString() === userId.toString());
+  return Array.isArray(this.blockedUsers)
+    ? this.blockedUsers.some(id => id.toString() === userId.toString())
+    : false;
 };
 
 // ===== STATIC METHODS (EXISTING + ENHANCED) =====
@@ -513,10 +538,12 @@ userSchema.statics.findByCredentials = function (identifier, password) {
 
 // ===== NEW STATIC METHODS FOR PROFILE =====
 userSchema.statics.searchUsers = function (searchTerm, limit = 20) {
+  // Escape user input — raw input in RegExp enables ReDoS
+  const safeTerm = String(searchTerm).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return this.find({
     $or: [
-      { username: new RegExp(searchTerm, 'i') },
-      { 'profile.displayName': new RegExp(searchTerm, 'i') }
+      { username: new RegExp(safeTerm, 'i') },
+      { 'profile.displayName': new RegExp(safeTerm, 'i') }
     ],
     isActive: true
   })
@@ -531,30 +558,28 @@ userSchema.statics.getTrendingUsers = function (limit = 10) {
     .limit(limit);
 };
 
-userSchema.statics.getSuggestedUsers = function (userId, limit = 10) {
-  // Get users not followed by current user, sorted by popularity
+userSchema.statics.getSuggestedUsers = async function (userId, limit = 10) {
+  // Exclude self and anyone the user already follows (resolved from the Follow
+  // collection — the embedded `followers` array is deprecated/unselected).
+  const Follow = mongoose.model('Follow');
+  const followingIds = await Follow.getFollowingIds(userId);
   return this.find({
-    _id: { $ne: userId },
-    followers: { $ne: userId },
+    _id: { $nin: [userId, ...followingIds] },
     isActive: true
   })
     .sort({ 'stats.followers': -1 })
     .select('username profile.displayName profile.avatar profile.bio isVerified stats')
-    .limit(limit);
+    .limit(limit)
+    .lean();
 };
 
 // ===== PRE-SAVE HOOKS =====
 userSchema.pre('save', function (next) {
-  // Sync stats with array lengths
-  if (this.isModified('followers')) {
-    this.stats.followers = this.followers.length;
-  }
-  if (this.isModified('following')) {
-    this.stats.following = this.following.length;
-  }
+  // Follower/following counts are maintained from the Follow collection, NOT
+  // from embedded array lengths (the arrays are deprecated & unselected).
 
   // Set displayName to username if not set
-  if (!this.profile.displayName && this.username) {
+  if (!this.profile?.displayName && this.username) {
     this.profile.displayName = this.username;
   }
 
