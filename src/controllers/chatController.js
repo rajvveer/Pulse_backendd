@@ -1,5 +1,6 @@
 const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
+const escapeRegex = require('../utils/escapeRegex');
 
 // @desc    Get or Create a conversation with a user (DM only)
 // @route   POST /api/v1/chat/conversation
@@ -42,16 +43,25 @@ exports.getOrCreateConversation = async (req, res) => {
 // @route   GET /api/v1/chat/conversations
 exports.getConversations = async (req, res) => {
   try {
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
+
     const conversations = await Conversation.find({
       participants: req.user.userId
     })
     .sort({ lastMessageAt: -1 })
+    .skip((page - 1) * limit)
+    .limit(limit)
     .populate('participants', 'username name avatar profile.avatar isVerified isOnline')
     .populate('admins', 'username name avatar profile.avatar')
     .populate('createdBy', 'username name avatar profile.avatar')
     .lean();
 
-    res.json({ success: true, data: conversations });
+    res.json({
+      success: true,
+      data: conversations,
+      pagination: { page, limit, hasMore: conversations.length === limit }
+    });
   } catch (error) {
     console.error('❌ Get conversations error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -110,10 +120,15 @@ exports.markConversationRead = async (req, res) => {
     const { conversationId } = req.params;
     const userId = req.user.userId;
 
-    // Reset the unread count specifically for this user to 0
-    await Conversation.findByIdAndUpdate(conversationId, {
-      $set: { [`unreadCounts.${userId}`]: 0 }
-    });
+    // Authorization: only participants can mark a conversation as read
+    const updated = await Conversation.findOneAndUpdate(
+      { _id: conversationId, participants: userId },
+      { $set: { [`unreadCounts.${userId}`]: 0 } }
+    );
+
+    if (!updated) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
 
     res.json({ success: true, message: 'Conversation marked as read' });
   } catch (error) {
@@ -195,7 +210,8 @@ exports.searchConversations = async (req, res) => {
     const conversations = await Conversation.find({
       participants: req.user.userId,
       $or: [
-        { groupName: { $regex: q, $options: 'i' } },
+        // Escaped — raw user input in $regex enables ReDoS
+        { groupName: { $regex: escapeRegex(q.trim()), $options: 'i' } },
         // Search in participants' usernames (requires aggregation for better performance)
       ]
     })

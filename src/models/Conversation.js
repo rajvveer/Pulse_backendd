@@ -71,6 +71,10 @@ const conversationSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 conversationSchema.index({ participants: 1 });
+// Conversation list query: find({participants:userId}).sort({lastMessageAt:-1}).
+// Compound index satisfies the match + sort from the index (no per-user
+// in-memory sort).
+conversationSchema.index({ participants: 1, lastMessageAt: -1 });
 conversationSchema.index({ lastMessageAt: -1 });
 conversationSchema.index({ type: 1 });
 

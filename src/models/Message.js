@@ -4,8 +4,7 @@ const messageSchema = new mongoose.Schema({
   conversation: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Conversation',
-    required: true,
-    index: true
+    required: true
   },
   sender: {
     type: mongoose.Schema.Types.ObjectId,
@@ -45,5 +44,12 @@ const messageSchema = new mongoose.Schema({
   }],
   isDeleted: { type: Boolean, default: false }
 }, { timestamps: true });
+
+// Chat history query is find({conversation}).sort({createdAt:-1}).limit(N).
+// This compound index lets Mongo satisfy BOTH the equality match and the sort
+// from the index — without it, busy group chats do an in-memory sort that
+// aborts at the 32MB limit and pins CPU under load. Replaces the redundant
+// single-field {conversation:1} index.
+messageSchema.index({ conversation: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Message', messageSchema);
