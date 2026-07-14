@@ -22,6 +22,10 @@ class CacheService {
 
     this.redis = redis;
     this.isConnected = false;
+    // In-flight promises for single-flight getOrSet (per worker). Prevents a
+    // cache-miss stampede: when 10K requests miss the same key at once, only
+    // ONE runs the expensive fetch; the rest await the same promise.
+    this._inflight = new Map();
 
     // Events
     this.redis.on("connect", () => {
@@ -91,20 +95,78 @@ class CacheService {
     }
   }
 
+  // Add ±10% jitter to a TTL so a batch of keys created together don't all
+  // expire on the same tick (which would cause a synchronized stampede).
+  _jitter(ttl) {
+    if (!ttl) return ttl;
+    const spread = Math.floor(ttl * 0.1);
+    return ttl + Math.floor((Math.random() * 2 - 1) * spread);
+  }
+
+  /**
+   * Cache-aside read with single-flight + TTL jitter.
+   *
+   * On a miss, only ONE caller per worker runs `fetchFunction`; concurrent
+   * callers for the same key await that same promise. This is the core defense
+   * against the feed read path melting MongoDB under load — a popular feed page
+   * that just expired is recomputed once, not once per concurrent request.
+   *
+   * Redis being down degrades gracefully to calling the fetch directly.
+   */
   async getOrSet(key, fetchFunction, ttl = 600) {
     const cached = await this.get(key);
     if (cached !== null) return cached;
 
-    const fresh = await fetchFunction();
-    await this.set(key, fresh, ttl);
-    return fresh;
+    // Coalesce concurrent misses on this key within this process.
+    if (this._inflight.has(key)) return this._inflight.get(key);
+
+    const promise = (async () => {
+      const fresh = await fetchFunction();
+      // Only cache non-empty results to avoid pinning an empty feed for a TTL.
+      if (fresh !== undefined && fresh !== null) {
+        await this.set(key, fresh, this._jitter(ttl));
+      }
+      return fresh;
+    })();
+
+    this._inflight.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      this._inflight.delete(key);
+    }
   }
 
+  // Delete every key matching a pattern (e.g. invalidate a user's feed pages).
+  // Uses SCAN (non-blocking) rather than KEYS, which is O(N) and blocks Redis.
+  async delPattern(pattern) {
+    try {
+      let cursor = '0';
+      let deleted = 0;
+      do {
+        const [next, keys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+        cursor = next;
+        if (keys.length) deleted += await this.redis.del(...keys);
+      } while (cursor !== '0');
+      return deleted;
+    } catch {
+      return 0;
+    }
+  }
+
+  // Atomic increment-with-expiry. The old INCR-then-EXPIRE was non-atomic: a
+  // crash between the two commands left a key with NO TTL, permanently locking
+  // that identifier (e.g. silently blocking a phone/email from ever receiving
+  // an OTP again). This Lua script sets the TTL on first increment in one
+  // atomic step.
   async incrementRateLimit(key, ttl = 60) {
     try {
-      const count = await this.redis.incr(key);
-      if (count === 1) await this.redis.expire(key, ttl);
-      return count;
+      const lua = `
+        local c = redis.call('INCR', KEYS[1])
+        if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+        return c
+      `;
+      return await this.redis.eval(lua, 1, key, ttl);
     } catch {
       return 1;
     }
