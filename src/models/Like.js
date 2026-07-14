@@ -67,19 +67,25 @@ likeSchema.statics.toggleLike = async function (userId, targetType, targetId) {
     const modelMap = { post: 'Post', reel: 'Reel', comment: 'Comment' };
     const targetTypeModel = modelMap[targetType];
 
-    const existing = await this.findOne({ user: userId, targetType, targetId });
+    // Delete-first toggle: deleteOne both checks and removes in one atomic
+    // operation, so concurrent requests can't double-create or throw E11000.
+    const deleted = await this.deleteOne({ user: userId, targetType, targetId });
 
-    if (existing) {
+    if (deleted.deletedCount > 0) {
         // Unlike
-        await this.deleteOne({ _id: existing._id });
         const count = await this.countDocuments({ targetType, targetId });
         return { liked: false, likeCount: count };
-    } else {
-        // Like
-        await this.create({ user: userId, targetType, targetId, targetTypeModel });
-        const count = await this.countDocuments({ targetType, targetId });
-        return { liked: true, likeCount: count };
     }
+
+    // Like — a concurrent request may have just created it; the unique index
+    // makes that a duplicate-key error, which we treat as "already liked".
+    try {
+        await this.create({ user: userId, targetType, targetId, targetTypeModel });
+    } catch (err) {
+        if (err.code !== 11000) throw err;
+    }
+    const count = await this.countDocuments({ targetType, targetId });
+    return { liked: true, likeCount: count };
 };
 
 /**
@@ -122,6 +128,35 @@ likeSchema.statics.getLikeVelocity = async function (targetType, targetId, hours
         createdAt: { $gte: since }
     });
     return count / hoursWindow;
+};
+
+/**
+ * Batch get like velocities - one aggregation for a whole feed candidate set
+ * instead of one countDocuments per post.
+ * @returns {Map} targetId(string) -> likes per hour in the window
+ */
+likeSchema.statics.getBatchLikeVelocities = async function (targetType, targetIds, hoursWindow = 1) {
+    const since = new Date(Date.now() - hoursWindow * 60 * 60 * 1000);
+    const objectIds = targetIds.map(id => {
+        try {
+            return new mongoose.Types.ObjectId(id.toString());
+        } catch (e) {
+            return id;
+        }
+    });
+
+    const results = await this.aggregate([
+        { $match: { targetType, targetId: { $in: objectIds }, createdAt: { $gte: since } } },
+        { $group: { _id: '$targetId', count: { $sum: 1 } } }
+    ]);
+
+    const velocityMap = new Map();
+    results.forEach(r => velocityMap.set(r._id.toString(), r.count / hoursWindow));
+    targetIds.forEach(id => {
+        const key = id.toString();
+        if (!velocityMap.has(key)) velocityMap.set(key, 0);
+    });
+    return velocityMap;
 };
 
 /**

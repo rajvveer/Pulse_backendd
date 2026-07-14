@@ -47,19 +47,25 @@ followSchema.index({ follower: 1, createdAt: -1 });
  * Toggle follow relationship. Returns { followed, followerCount, followingCount }
  */
 followSchema.statics.toggleFollow = async function (followerId, followingId) {
-  const existing = await this.findOne({ follower: followerId, following: followingId });
+  // Delete-first toggle: atomic check-and-remove, so concurrent requests
+  // can't double-create (the unique index would make that a 500).
+  const deleted = await this.deleteOne({ follower: followerId, following: followingId });
 
-  if (existing) {
-    await this.deleteOne({ _id: existing._id });
+  if (deleted.deletedCount > 0) {
     const followerCount = await this.countDocuments({ following: followingId });
     const followingCount = await this.countDocuments({ follower: followerId });
     return { followed: false, followerCount, followingCount };
-  } else {
-    await this.create({ follower: followerId, following: followingId });
-    const followerCount = await this.countDocuments({ following: followingId });
-    const followingCount = await this.countDocuments({ follower: followerId });
-    return { followed: true, followerCount, followingCount };
   }
+
+  try {
+    await this.create({ follower: followerId, following: followingId });
+  } catch (err) {
+    // Duplicate from a concurrent follow — already in the desired state
+    if (err.code !== 11000) throw err;
+  }
+  const followerCount = await this.countDocuments({ following: followingId });
+  const followingCount = await this.countDocuments({ follower: followerId });
+  return { followed: true, followerCount, followingCount };
 };
 
 /**
