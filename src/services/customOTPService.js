@@ -72,6 +72,29 @@ class CustomOTPService {
     return otp;
   }
 
+  // Global SMS send budget — a circuit breaker on Twilio spend. Even with
+  // per-identifier and per-IP limits, an attacker rotating numbers could rack
+  // up cost; this caps TOTAL SMS sends per rolling day across the whole system.
+  // Fails CLOSED in production (SMS costs money) if the budget can't be read.
+  async checkGlobalSmsBudget() {
+    const dailyMax = parseInt(process.env.SMS_GLOBAL_DAILY_MAX) || 5000;
+    try {
+      const key = `sms_budget:${new Date().toISOString().slice(0, 10)}`; // per UTC day
+      const count = await cacheService.incrementRateLimit(key, 24 * 60 * 60);
+      if (count > dailyMax) {
+        throw new Error('Global SMS budget exhausted for today.');
+      }
+      return count;
+    } catch (error) {
+      if (error.message && error.message.includes('budget exhausted')) throw error;
+      if (process.env.NODE_ENV === 'production') {
+        console.error('SMS budget check failed — refusing send:', error.message || error);
+        throw new Error('SMS service temporarily unavailable. Please try again shortly.');
+      }
+      return 1; // dev: allow
+    }
+  }
+
   // Rate limiting check
   async checkRateLimit(identifier, type, maxAttempts = 5, windowMs = 15 * 60 * 1000) {
     try {
@@ -85,7 +108,13 @@ class CustomOTPService {
       if (error.message && error.message.includes('Too many')) {
         throw error;
       }
-      console.warn('Rate limiting check failed, continuing:', error.message || error);
+      // Redis failure: fail CLOSED in production — OTP sends cost money and
+      // failing open would disable abuse protection exactly when degraded.
+      if (process.env.NODE_ENV === 'production') {
+        console.error('OTP rate limit check failed — refusing send:', error.message || error);
+        throw new Error('OTP service temporarily unavailable. Please try again shortly.');
+      }
+      console.warn('Rate limiting check failed, continuing (dev only):', error.message || error);
       return 1;
     }
   }
@@ -156,6 +185,8 @@ class CustomOTPService {
         throw new Error('Please enter a valid Indian mobile number.');
       }
 
+      // Global spend circuit breaker first, then per-number rate limit.
+      await this.checkGlobalSmsBudget();
       await this.checkRateLimit(fullPhone, 'sms');
       const otp = this.generateOTP(6);
       const hashedOTP = await bcrypt.hash(otp, 10);
@@ -591,12 +622,9 @@ class CustomOTPService {
 
       await OTP.deleteMany({ identifier: lookupIdentifier, purpose, verified: false });
 
-      const rateLimitKey = `otp_rate_limit:${type}:${lookupIdentifier}`;
-      try {
-        await cacheService.del(rateLimitKey);
-      } catch (cacheErr) {
-        console.warn('⚠️ Could not clear rate limit cache:', cacheErr);
-      }
+      // NOTE: deliberately NOT clearing the send rate-limit key here — doing
+      // so let clients reset the 5-sends-per-15-min limit by calling resend.
+      // sendEmailOTP / sendSMSOTP below enforce the same shared counter.
 
       if (type === 'email') {
         return await this.sendEmailOTP(identifier, purpose, userId, ipAddress);

@@ -6,6 +6,11 @@ const customOTPService = require('./customOTPService');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const firebaseConfig = require('../config/firebase');
+const cacheService = require('./cacheService');
+
+// Tokens are stored in MongoDB as SHA-256 hashes so a database leak does not
+// expose live credentials. Lookups hash the incoming token before matching.
+const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
 
 class AuthService {
   // Initiate authentication process (EMAIL + PHONE)
@@ -427,8 +432,8 @@ async loginWithFirebase(idToken, accessToken, deviceInfo, ipAddress, extraInfo =
       }
 
       // Validate password
-      if (password.length < 6) {
-        throw new Error('Password must be at least 6 characters long');
+      if (password.length < 8) {
+        throw new Error('Password must be at least 8 characters long');
       }
 
       console.log(`Username created for user: ${user._id}`);
@@ -490,8 +495,8 @@ async loginWithFirebase(idToken, accessToken, deviceInfo, ipAddress, extraInfo =
           appVersion: deviceInfo.appVersion || '1.0.0',
           osVersion: deviceInfo.osVersion || 'Unknown'
         },
-        accessToken: accessToken,
-        refreshToken: refreshToken,
+        accessToken: hashToken(accessToken),
+        refreshToken: hashToken(refreshToken),
         ipAddress: ipAddress,
         isActive: true,
         lastActivity: new Date(),
@@ -540,11 +545,11 @@ async loginWithFirebase(idToken, accessToken, deviceInfo, ipAddress, extraInfo =
       // Verify refresh token
       const decoded = jwtService.verifyRefreshToken(refreshToken);
       
-      // Find active session
+      // Find active session (tokens are stored hashed)
       const session = await Session.findOne({
         userId: decoded.userId,
         deviceId: decoded.deviceId,
-        refreshToken: refreshToken,
+        refreshToken: hashToken(refreshToken),
         isActive: true,
         expiresAt: { $gt: new Date() }
       });
@@ -575,9 +580,9 @@ async loginWithFirebase(idToken, accessToken, deviceInfo, ipAddress, extraInfo =
 
       const newRefreshToken = jwtService.generateRefreshToken(newRefreshPayload);
 
-      // Update session
-      session.accessToken = newAccessToken;
-      session.refreshToken = newRefreshToken;
+      // Update session (tokens are stored hashed)
+      session.accessToken = hashToken(newAccessToken);
+      session.refreshToken = hashToken(newRefreshToken);
       session.lastActivity = new Date();
       await session.save();
 
@@ -686,7 +691,7 @@ async loginWithFirebase(idToken, accessToken, deviceInfo, ipAddress, extraInfo =
   }
 
   // Logout user
-  async logoutUser(userId, deviceId) {
+  async logoutUser(userId, deviceId, accessToken = null) {
     try {
       // Deactivate session
       await Session.updateMany(
@@ -702,6 +707,16 @@ async loginWithFirebase(idToken, accessToken, deviceInfo, ipAddress, extraInfo =
           } 
         }
       );
+
+      // Revoke the access token immediately — otherwise it stays valid until
+      // expiry even though the session is gone. TTL matches the max token life.
+      if (accessToken) {
+        try {
+          await cacheService.set(`revoked_token:${hashToken(accessToken)}`, '1', 900);
+        } catch (e) {
+          console.warn('Token revocation cache write failed:', e.message);
+        }
+      }
 
       console.log(`👋 User ${userId} logged out from device: ${deviceId}`);
 

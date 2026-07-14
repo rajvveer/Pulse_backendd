@@ -2,12 +2,13 @@ const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
 const authMiddleware = require('../middlewares/auth');
+const { refreshLimiter } = require('../middlewares/rateLimit');
 
 // Public routes
 router.post('/initiate', authController.authRateLimit, authController.initiateAuth);
 router.post('/verify-otp', authController.authRateLimit, authController.verifyOTP);
 router.post('/create-username', authController.authRateLimit, authController.createUsername);
-router.post('/refresh-token', authController.refreshToken);
+router.post('/refresh-token', refreshLimiter, authController.refreshToken);
 router.post('/resend-otp', authController.otpRateLimit, authController.resendOTP);
 router.get('/check-username', authController.checkUsername);
 

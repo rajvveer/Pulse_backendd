@@ -65,7 +65,8 @@ class JWTService {
     try {
       const decoded = jwt.verify(token, this.accessTokenSecret, {
         issuer: 'pulse-app',
-        audience: 'pulse-users'
+        audience: 'pulse-users',
+        algorithms: ['HS256']
       });
       
       if (decoded.type !== 'access') {
@@ -89,7 +90,8 @@ class JWTService {
     try {
       const decoded = jwt.verify(token, this.refreshTokenSecret, {
         issuer: 'pulse-app',
-        audience: 'pulse-users'
+        audience: 'pulse-users',
+        algorithms: ['HS256']
       });
       
       if (decoded.type !== 'refresh') {
@@ -113,7 +115,8 @@ class JWTService {
     try {
       const decoded = jwt.verify(token, this.tempTokenSecret, {
         issuer: 'pulse-app',
-        audience: 'pulse-users'
+        audience: 'pulse-users',
+        algorithms: ['HS256']
       });
       
       if (decoded.type !== 'temporary') {

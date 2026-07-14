@@ -1,6 +1,6 @@
 // src/controllers/authController.js
 const authService = require('../services/authService');
-const rateLimit = require('express-rate-limit');
+const { authLimiter, otpLimiter } = require('../middlewares/rateLimit');
 
 // Phone number validation for Indian numbers
 const validatePhoneNumber = (phone) => {
@@ -23,30 +23,10 @@ const validateEmail = (email) => {
   return email.toLowerCase().trim();
 };
 
-// Rate limiting configurations
-const authRateLimit = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: {
-    success: false,
-    error: 'Too many authentication attempts, please try again later',
-    code: 'RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const otpRateLimit = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5,
-  message: {
-    success: false,
-    error: 'Too many OTP requests, please try again later',
-    code: 'OTP_RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+// Rate limiting — Redis-backed shared limiters so counters survive restarts
+// and are correct under cluster mode (in-memory limiters multiply by worker count)
+const authRateLimit = authLimiter;
+const otpRateLimit = otpLimiter;
 
 // Helper: build E.164 phone format
 const buildE164Phone = (identifier) => {
@@ -387,7 +367,9 @@ const logout = async (req, res) => {
       });
     }
 
-    const result = await authService.logoutUser(user.userId, deviceId);
+    // Pass the raw access token so it can be revoked immediately
+    const accessToken = req.headers.authorization?.split(' ')[1] || null;
+    const result = await authService.logoutUser(user.userId, deviceId, accessToken);
     res.json(result);
 
   } catch (error) {
