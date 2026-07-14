@@ -22,7 +22,12 @@ if (process.env.SENTRY_DSN) {
 }
 const app = express();
 
-app.set('trust proxy', 1); // Trust 1 proxy hop (Railway/Heroku). Avoids rate-limit bypass via IP spoofing.
+// Trust proxy — number of hops between the client and this process (LB +
+// ingress + platform router can be >1). Set TRUST_PROXY_HOPS to match your
+// actual topology: too low makes req.ip the proxy's IP (everyone shares one
+// rate-limit bucket); too high lets clients spoof X-Forwarded-For to evade
+// IP-based limits. Default 1 (single platform proxy, e.g. Railway/Heroku).
+app.set('trust proxy', parseInt(process.env.TRUST_PROXY_HOPS) || 1);
 
 // Security middleware
 app.use(helmet({
@@ -37,7 +42,7 @@ app.use(helmet({
 // Web origins are checked against a whitelist to prevent cross-site attacks.
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',')
-  : ['http://localhost:5174', 'http://127.0.0.1:5174', 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173'];
+  : ['http://localhost:5174', 'http://127.0.0.1:5174', 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://localhost:3100', 'http://127.0.0.1:3100'];
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -73,9 +78,13 @@ if (process.env.NODE_ENV === 'production') {
   app.use(morgan('combined'));
 }
 
-// Body parsing middleware (10MB — media uploads go through multer/Cloudinary)
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Body parsing middleware. Media uploads go through multer (multipart), NOT
+// JSON, so the JSON limit can be small — a 10MB JSON body × high concurrency
+// is a memory + sanitize-cost amplifier. 256KB is ample for posts/comments/
+// profile payloads (override with JSON_BODY_LIMIT if a route needs more).
+const JSON_LIMIT = process.env.JSON_BODY_LIMIT || '256kb';
+app.use(express.json({ limit: JSON_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: JSON_LIMIT }));
 
 // XSS Sanitization — clean all user input to prevent stored XSS attacks
 app.use(sanitizeBody);
@@ -96,6 +105,27 @@ app.use((req, res, next) => {
   next();
 });
 
+// Production safety net: many controllers return `error.message` in 500
+// responses, which can leak Mongoose/internal details. Scrub all 5xx JSON
+// bodies centrally so nothing internal reaches clients in production.
+if (process.env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    const originalJson = res.json.bind(res);
+    res.json = (body) => {
+      if (res.statusCode >= 500) {
+        return originalJson({
+          success: false,
+          error: 'An unexpected internal server error occurred.',
+          code: (body && typeof body === 'object' && body.code) || 'INTERNAL_ERROR',
+          requestId: req.requestId
+        });
+      }
+      return originalJson(body);
+    };
+    next();
+  });
+}
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
@@ -115,10 +145,11 @@ app.use('/api/v1/chat', require('./routes/chatRoutes'));
 app.use('/api/v1/media', require('./routes/media'));
 app.use('/api/v1/gifs', require('./routes/gifs'));
 app.use('/api/v1/reels', require('./routes/reelRoutes'));
+app.use('/api/v1/snaps', require('./routes/snapRoutes'));
 app.use('/api/v1/groups', require('./routes/groupRoutes'));
 
 // NEW FEATURE ROUTES
-// app.use('/api/v1/admin', require('./routes/adminRoutes'));
+app.use('/api/v1/admin', require('./routes/adminRoutes'));
 app.use('/api/v1/whispers', require('./routes/whisperRoutes'));
 app.use('/api/v1/pulse-drops', require('./routes/pulseDropRoutes'));
 app.use('/api/v1/chains', require('./routes/chainRoutes'));
@@ -134,16 +165,21 @@ app.use('/api/v1/referral', require('./routes/referralRoutes'));
 // Open Graph share routes (public — no auth, crawlers need access)
 app.use('/share', require('./routes/ogRoutes'));
 
-// Swagger API Documentation (available at /api-docs)
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  customCss: '.swagger-ui .topbar { display: none }',
-  customSiteTitle: 'Pulse API Documentation'
-}));
-// JSON spec endpoint for tooling
-app.get('/api-docs.json', (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.send(swaggerSpec);
-});
+// Swagger API Documentation (available at /api-docs).
+// Hidden in production unless ENABLE_API_DOCS=true — the full API surface is
+// useful reconnaissance for attackers.
+const apiDocsEnabled = process.env.NODE_ENV !== 'production' || process.env.ENABLE_API_DOCS === 'true';
+if (apiDocsEnabled) {
+  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+    customCss: '.swagger-ui .topbar { display: none }',
+    customSiteTitle: 'Pulse API Documentation'
+  }));
+  // JSON spec endpoint for tooling
+  app.get('/api-docs.json', (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.send(swaggerSpec);
+  });
+}
 // 404 handler
 app.use((req, res, next) => {
   res.status(404).json({
@@ -154,6 +190,11 @@ app.use((req, res, next) => {
     timestamp: new Date().toISOString()
   });
 });
+
+// Report errors to Sentry before the custom handler formats the response
+if (process.env.SENTRY_DSN) {
+  Sentry.setupExpressErrorHandler(app);
+}
 
 // Global error handler
 app.use((error, req, res, next) => {
@@ -178,9 +219,15 @@ app.use((error, req, res, next) => {
     });
   }
 
-  res.status(error.status || 500).json({
+  const status = error.status || 500;
+  // Never leak internal error messages on 5xx in production
+  const safeMessage = (status >= 500 && process.env.NODE_ENV === 'production')
+    ? 'An unexpected internal server error occurred.'
+    : (error.message || 'An unexpected internal server error occurred.');
+
+  res.status(status).json({
     success: false,
-    error: error.message || 'An unexpected internal server error occurred.',
+    error: safeMessage,
     code: error.code || 'INTERNAL_ERROR',
     requestId: req.requestId,
     ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
