@@ -8,9 +8,10 @@ const smtpConfig = require('./config/smtp');
 const cacheService = require('./services/cacheService');
 
 const app = require('./app');
+const Sentry = require('@sentry/node');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
-const jwt = require('jsonwebtoken');
+const jwtService = require('./services/jwtService');
 const { createAdapter } = require('@socket.io/redis-adapter');
 
 // Import the Chat Realtime Handler
@@ -46,9 +47,21 @@ const io = new Server(server, {
   pingTimeout: 20000,     // 20 seconds — detect dead connections sooner
   pingInterval: 25000,    // 25 seconds
 
-  // TRANSPORT — prefer websocket, fallback to polling
-  transports: ['websocket', 'polling'],
-  allowUpgrades: true,
+  // TRANSPORT — websocket only by default.
+  //
+  // HTTP long-polling requires every request in a session to land on the SAME
+  // process. Across many containers behind a load balancer that means we'd
+  // need sticky sessions (cookie / ip-hash) configured at the LB, or polling
+  // handshakes fail with "Session ID unknown" and clients churn in a
+  // connect/disconnect loop. The mobile client holds one long-lived websocket,
+  // so we disable polling entirely and avoid the affinity requirement.
+  //
+  // If you MUST re-enable polling (e.g. a browser client behind a restrictive
+  // proxy), set SOCKET_ENABLE_POLLING=true AND configure LB sticky sessions.
+  transports: process.env.SOCKET_ENABLE_POLLING === 'true'
+    ? ['websocket', 'polling']
+    : ['websocket'],
+  allowUpgrades: process.env.SOCKET_ENABLE_POLLING === 'true',
 
   // CONNECTION SETTINGS
   connectTimeout: 60000,  // 60 second connection timeout
@@ -60,10 +73,12 @@ const io = new Server(server, {
   perMessageDeflate: false,
   httpCompression: false,
 
-  // RECONNECTION — auto-recover connection state
+  // RECONNECTION — auto-recover connection state.
+  // skipMiddlewares MUST stay false so reconnecting sockets re-run JWT auth
+  // (a token may have expired or been revoked during the disconnect window).
   connectionStateRecovery: {
     maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
-    skipMiddlewares: true,
+    skipMiddlewares: false,
   },
 });
 
@@ -86,10 +101,22 @@ try {
     io.adapter(createAdapter(pubClient, subClient));
     console.log('✅ Socket.IO Redis adapter attached — cluster-safe real-time enabled');
   }).catch((err) => {
-    console.warn('⚠️  Socket.IO Redis adapter failed — falling back to in-memory (single-worker only):', err.message);
+    // CRITICAL at scale: without the adapter, events do NOT propagate across
+    // workers/containers — a message sent on one instance never reaches a
+    // recipient connected to another. This must be loud (and Sentry-reported)
+    // rather than a quiet warning, because the app silently half-works.
+    const msg = `Socket.IO Redis adapter FAILED — real-time is degraded to in-memory (single-instance only): ${err.message}`;
+    console.error(`🚨 ${msg}`);
+    if (process.env.SENTRY_DSN) {
+      try { Sentry.captureMessage(msg, 'fatal'); } catch { /* noop */ }
+    }
   });
 } catch (err) {
-  console.warn('⚠️  Socket.IO Redis adapter setup error:', err.message);
+  const msg = `Socket.IO Redis adapter setup error — real-time may be degraded: ${err.message}`;
+  console.error(`🚨 ${msg}`);
+  if (process.env.SENTRY_DSN) {
+    try { Sentry.captureMessage(msg, 'fatal'); } catch { /* noop */ }
+  }
 }
 
 // ✅ Socket Authentication Middleware — SECURED
@@ -105,8 +132,19 @@ io.use((socket, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, config.get('jwt.secret') || process.env.JWT_SECRET);
+    // Same verification path as REST: pinned algorithm, issuer, audience,
+    // and token type — a refresh or temp token cannot open a socket.
+    const decoded = jwtService.verifyAccessToken(token);
     socket.userId = decoded.userId;
+    // Cache a lightweight sender profile on the socket so send_message can
+    // build its broadcast payload WITHOUT re-reading the message + author
+    // from Mongo on every message (see sockets/realtime.js).
+    socket.user = {
+      _id: decoded.userId,
+      username: decoded.username,
+      name: decoded.username,
+      isVerified: decoded.isVerified,
+    };
     next();
   } catch (err) {
     console.warn(`⛔ Socket connection rejected — ${err.message}`);
@@ -123,11 +161,14 @@ async function initialize() {
     console.log('📚 Connecting to MongoDB...');
     await databaseConfig.connect();
 
-    // 2. Initialize Redis Cache
+    // 2. Initialize Redis Cache — required in production (rate limiting,
+    // Socket.IO clustering, and caching all depend on it)
     console.log('🔴 Testing Redis connection...');
     const redisHealth = await cacheService.ping();
     if (redisHealth) {
       console.log('✅ Redis connected successfully');
+    } else if (config.isProduction()) {
+      throw new Error('Redis is unavailable — refusing to start in production');
     } else {
       console.warn('⚠️  Redis connection failed - using fallback cache');
     }
@@ -143,6 +184,12 @@ async function initialize() {
     // 5. Create database indexes
     console.log('📝 Creating database indexes...');
     await databaseConfig.createIndexes();
+
+    // 6. Start background jobs (Redis-locked, so safe under cluster mode)
+    if (config.get('features.enableBackgroundJobs')) {
+      console.log('🛠️  Starting background job scheduler...');
+      require('./jobs/scheduler').start();
+    }
 
     console.log('\n✅ All services initialized successfully!\n');
 
@@ -160,25 +207,30 @@ async function initialize() {
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
-  console.log(`👤 User connected: ${socket.id} ${socket.userId ? `(ID: ${socket.userId})` : ''}`);
+  // Always join the user's own room so server-side code can target a specific
+  // user (notifications, etc.) regardless of which worker they're on.
+  if (socket.userId) socket.join(`user_${socket.userId}`);
 
-  // ✅ ADDED: Attach the Real-Time Chat Logic here
-  // This enables join_conversation, send_message, typing_start, etc.
+  // Attach the Real-Time Chat Logic (join_conversation, send_message, typing,
+  // presence...). Presence is Redis-backed and scoped to conversation peers
+  // inside this handler — there is intentionally NO global io.emit anywhere.
   realtimeHandler(io, socket);
 
-  socket.on('disconnect', () => {
-    console.log(`👋 User disconnected: ${socket.id}`);
-  });
+  // Real-time features for social app.
+  // Only allow well-known public room patterns here — conversation rooms must
+  // go through the membership-checked join_conversation handler in realtime.js.
+  const isJoinableRoom = (room) =>
+    typeof room === 'string' &&
+    (/^location_-?\d+_-?\d+$/.test(room) || room === `user_${socket.userId}`);
 
-  // Real-time features for social app
   socket.on('join-room', (room) => {
+    if (!isJoinableRoom(room)) return;
     socket.join(room);
-    console.log(`📍 User ${socket.id} joined room: ${room}`);
   });
 
   socket.on('leave-room', (room) => {
+    if (typeof room !== 'string') return;
     socket.leave(room);
-    console.log(`🚪 User ${socket.id} left room: ${room}`);
   });
 
   // Location-based room joining
@@ -186,30 +238,38 @@ io.on('connection', (socket) => {
     if (!location?.lat || !location?.lng) return;
     const locationRoom = `location_${Math.round(location.lat * 1000)}_${Math.round(location.lng * 1000)}`;
     socket.join(locationRoom);
-    console.log(`📍 User ${socket.id} joined location: ${locationRoom}`);
-  });
-
-  // User presence — uses the AUTHENTICATED userId from JWT, never client-supplied
-  socket.on('user-online', () => {
-    if (!socket.userId) return;
-    socket.join(`user_${socket.userId}`);
-    io.emit('user-status', { userId: socket.userId, status: 'online' });
-  });
-
-  socket.on('user-typing', (data) => {
-    if (!data?.room) return;
-    socket.to(data.room).emit('user-typing', {
-      userId: socket.userId,
-      isTyping: data.isTyping
-    });
   });
 });
 
 // Make io accessible to routes
 app.set('socketio', io);
 
-// Enhanced health check endpoint
+// Event-loop lag sampler — the key saturation signal for this workload (feed
+// ranking + frame serialization are synchronous). We measure how late a 1s
+// timer actually fires; sustained lag means the loop is overloaded.
+let eventLoopLagMs = 0;
+{
+  let last = Date.now();
+  const timer = setInterval(() => {
+    const now = Date.now();
+    eventLoopLagMs = Math.max(0, now - last - 1000);
+    last = now;
+  }, 1000);
+  timer.unref?.();
+}
+
+// Readiness state — flipped to false on SIGTERM so the load balancer drains
+// this instance BEFORE we start tearing down connections (see graceful
+// shutdown below).
+let isShuttingDown = false;
+
+// Liveness probe — is the process up? (Used by Docker HEALTHCHECK.) Cheap and
+// dependency-free: a hung event loop won't answer, which is exactly what
+// liveness should detect.
 app.get('/health', (req, res) => {
+  if (isShuttingDown) {
+    return res.status(503).json({ status: 'SHUTTING_DOWN' });
+  }
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
@@ -219,8 +279,85 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Readiness probe — should the LB route traffic here RIGHT NOW? Checks the
+// critical dependencies (Mongo + Redis) with a short timeout and caches the
+// result for a few seconds so a probe storm can't hammer the DB. Returns 503
+// when a dependency is down (LB stops routing) or during shutdown drain.
+let readyCache = { at: 0, ok: false, body: null };
+const READY_CACHE_MS = 3000;
+const withTimeout = (p, ms) =>
+  Promise.race([
+    Promise.resolve(p),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+
+app.get('/health/ready', async (req, res) => {
+  if (isShuttingDown) {
+    return res.status(503).json({ status: 'SHUTTING_DOWN', ready: false });
+  }
+
+  const now = Date.now();
+  if (readyCache.body && now - readyCache.at < READY_CACHE_MS) {
+    return res.status(readyCache.ok ? 200 : 503).json(readyCache.body);
+  }
+
+  const [db, redis] = await Promise.all([
+    withTimeout(databaseConfig.isHealthy(), 1000).catch(() => false),
+    withTimeout(cacheService.ping(), 1000).catch(() => false),
+  ]);
+
+  const ok = db === true && redis === true;
+  const body = {
+    status: ok ? 'READY' : 'NOT_READY',
+    ready: ok,
+    services: { database: db === true, redis: redis === true },
+    timestamp: new Date().toISOString(),
+  };
+  readyCache = { at: now, ok, body };
+  res.status(ok ? 200 : 503).json(body);
+});
+
+// Guard for introspection endpoints: open in development, but in production
+// they expose infrastructure details, so require a shared key header.
+const internalOnly = (req, res, next) => {
+  if (!config.isProduction()) return next();
+  const key = process.env.INTERNAL_STATUS_KEY;
+  if (key && req.headers['x-internal-key'] === key) return next();
+  return res.status(404).json({ success: false, message: 'Not found' });
+};
+
+// Prometheus-style metrics endpoint (text exposition format). Surfaces the
+// saturation signals an HPA / scraper needs: event-loop lag, live socket count,
+// memory, and uptime. Gated by internalOnly so it isn't public. If you later
+// add prom-client, swap this for its registry — the metric names are aligned.
+app.get('/metrics', internalOnly, (req, res) => {
+  const mem = process.memoryUsage();
+  const lines = [
+    '# HELP pulse_event_loop_lag_ms Event loop lag in milliseconds',
+    '# TYPE pulse_event_loop_lag_ms gauge',
+    `pulse_event_loop_lag_ms ${eventLoopLagMs}`,
+    '# HELP pulse_socket_connections Currently connected Socket.IO clients (this instance)',
+    '# TYPE pulse_socket_connections gauge',
+    `pulse_socket_connections ${io.engine?.clientsCount || 0}`,
+    '# HELP pulse_socket_rooms Active Socket.IO rooms (this instance)',
+    '# TYPE pulse_socket_rooms gauge',
+    `pulse_socket_rooms ${io.sockets?.adapter?.rooms?.size || 0}`,
+    '# HELP pulse_memory_heap_used_bytes Process heap used',
+    '# TYPE pulse_memory_heap_used_bytes gauge',
+    `pulse_memory_heap_used_bytes ${mem.heapUsed}`,
+    '# HELP pulse_memory_rss_bytes Process resident set size',
+    '# TYPE pulse_memory_rss_bytes gauge',
+    `pulse_memory_rss_bytes ${mem.rss}`,
+    '# HELP pulse_uptime_seconds Process uptime',
+    '# TYPE pulse_uptime_seconds counter',
+    `pulse_uptime_seconds ${Math.floor(process.uptime())}`,
+  ];
+  res.setHeader('Content-Type', 'text/plain; version=0.0.4');
+  res.send(lines.join('\n') + '\n');
+});
+
 // Detailed health check endpoint with full system information
-app.get('/health/detailed', async (req, res) => {
+app.get('/health/detailed', internalOnly, async (req, res) => {
   try {
     const startTime = Date.now();
 
@@ -318,7 +455,7 @@ app.get('/health/detailed', async (req, res) => {
 });
 
 // API status endpoint
-app.get('/status', (req, res) => {
+app.get('/status', internalOnly, (req, res) => {
   res.json({
     api: 'Pulse Backend',
     version: '1.0.0',
@@ -349,6 +486,13 @@ async function startServer() {
     // Initialize all services
     await initialize();
 
+    // HTTP timeouts — protect against slow-loris / stuck connections holding
+    // sockets open. keepAliveTimeout must be < headersTimeout, and both should
+    // exceed the load balancer's idle timeout to avoid 502s on reused conns.
+    server.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_TIMEOUT_MS) || 65000;
+    server.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT_MS) || 66000;
+    server.requestTimeout = parseInt(process.env.HTTP_REQUEST_TIMEOUT_MS) || 30000;
+
     // Start HTTP server
     server.listen(PORT, () => {
       console.log(`🚀 Pulse Backend Server running on port ${PORT}`);
@@ -370,68 +514,66 @@ async function startServer() {
   }
 }
 
-// Graceful shutdown handlers
-process.on('SIGTERM', async () => {
-  console.log('\n🛑 SIGTERM received. Shutting down gracefully...');
+// Graceful shutdown — single implementation shared by SIGTERM/SIGINT.
+//
+// Order matters at 100K scale to avoid a synchronized reconnect storm:
+//   1. Flip readiness to 503 so the LB stops routing NEW traffic here.
+//   2. Wait a short grace period for the LB to actually deregister us.
+//   3. Tell connected sockets to reconnect (with client-side jitter) and
+//      disconnect them gracefully, rather than yanking them all at once.
+//   4. Stop accepting new HTTP, then close dependencies.
+let shuttingDownAlready = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDownAlready) return;
+  shuttingDownAlready = true;
+  isShuttingDown = true; // /health and /health/ready now return 503
+  console.log(`\n🛑 ${signal} received. Draining...`);
 
-  server.close(async () => {
+  const DRAIN_MS = parseInt(process.env.SHUTDOWN_DRAIN_MS) || 5000;
+  const FORCE_MS = parseInt(process.env.SHUTDOWN_FORCE_MS) || 30000;
+
+  // Hard cap — never hang forever.
+  const forceTimer = setTimeout(() => {
+    console.error('⏰ Forced shutdown after timeout');
+    process.exit(1);
+  }, FORCE_MS);
+  forceTimer.unref?.();
+
+  try {
+    // 2. Let the LB notice we're unready before we cut connections.
+    await new Promise((r) => setTimeout(r, DRAIN_MS));
+
+    // 3. Ask clients to reconnect elsewhere (the client should add random
+    //    backoff so a whole pod's worth of sockets don't reconnect in lockstep).
+    try {
+      io.emit('server_shutdown', { reconnectInMs: 1000 + Math.floor(Math.random() * 4000) });
+      io.disconnectSockets(true);
+    } catch (e) {
+      console.warn('Socket drain warning:', e.message);
+    }
+
+    // 4. Stop accepting new connections, then tear down dependencies.
+    await new Promise((resolve) => server.close(resolve));
     console.log('🔌 HTTP server closed');
 
-    // Close Socket.IO
-    io.close(() => {
-      console.log('📡 Socket.IO server closed');
-    });
+    await new Promise((resolve) => io.close(resolve));
+    console.log('📡 Socket.IO server closed');
 
-    // Close database connection
     await databaseConfig.disconnect();
-
-    // Close Redis connection
     await cacheService.disconnect();
-
-    // Close SMTP connection
     await smtpConfig.close();
 
+    clearTimeout(forceTimer);
     console.log('👋 Graceful shutdown completed');
     process.exit(0);
-  });
-
-  // Force shutdown after 30 seconds
-  setTimeout(() => {
-    console.error('⏰ Forced shutdown after 30 seconds');
+  } catch (err) {
+    console.error('Shutdown error:', err);
     process.exit(1);
-  }, 30000);
-});
+  }
+}
 
-process.on('SIGINT', async () => {
-  console.log('\n🛑 SIGINT received. Shutting down gracefully...');
-
-  server.close(async () => {
-    console.log('🔌 HTTP server closed');
-
-    // Close Socket.IO
-    io.close(() => {
-      console.log('📡 Socket.IO server closed');
-    });
-
-    // Close database connection
-    await databaseConfig.disconnect();
-
-    // Close Redis connection
-    await cacheService.disconnect();
-
-    // Close SMTP connection  
-    await smtpConfig.close();
-
-    console.log('👋 Graceful shutdown completed');
-    process.exit(0);
-  });
-
-  // Force shutdown after 30 seconds
-  setTimeout(() => {
-    console.error('⏰ Forced shutdown after 30 seconds');
-    process.exit(1);
-  }, 30000);
-});
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
