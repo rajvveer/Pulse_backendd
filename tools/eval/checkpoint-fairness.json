@@ -1,0 +1,34 @@
+{
+  "native": {
+    "label": "native",
+    "nDCG": 0.1307,
+    "precisionAtK": 0.1503,
+    "recallAtK": 0.02,
+    "MRR": 0.4515,
+    "authorDiversity": 0.9861,
+    "vibeDiversity": 0.7926,
+    "avgMaxAuthorRun": 1.15,
+    "novelty": 6.6102,
+    "coverage": 0.232,
+    "giniExposure": 0.5989,
+    "coldUserHitRate": 1,
+    "coldAuthorReach": 1,
+    "k": 20
+  },
+  "retrieveRank": {
+    "label": "retrieve+rank",
+    "nDCG": 0.3912,
+    "precisionAtK": 0.327,
+    "recallAtK": 0.2316,
+    "MRR": 0.6287,
+    "authorDiversity": 0.9886,
+    "vibeDiversity": 0.5755,
+    "avgMaxAuthorRun": 1.085,
+    "novelty": 5.5166,
+    "coverage": 0.47,
+    "giniExposure": 0.4179,
+    "coldUserHitRate": 1,
+    "coldAuthorReach": 1,
+    "k": 20
+  }
+}
