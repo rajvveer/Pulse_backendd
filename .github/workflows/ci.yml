@@ -1,0 +1,74 @@
+name: Pulse Backend CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20.x]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint:check || true
+
+      - name: Run unit tests
+        run: npm run test:unit -- --ci --forceExit --passWithNoTests
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-ci
+          JWT_REFRESH_SECRET: test-refresh-secret-ci
+          TEMP_JWT_SECRET: test-temp-secret-ci
+
+      - name: Run integration tests
+        run: npm run test:integration -- --ci --forceExit --passWithNoTests
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-ci
+          JWT_REFRESH_SECRET: test-refresh-secret-ci
+          TEMP_JWT_SECRET: test-temp-secret-ci
+
+  security-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: npm audit --audit-level=high || true
+
+      - name: Check for .env files in repo
+        run: |
+          if git ls-files --cached | grep -q '\.env$'; then
+            echo "::error::.env file is tracked by git!"
+            exit 1
+          fi
+          echo "No .env files tracked"
