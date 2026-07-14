@@ -89,10 +89,11 @@ const socialDNASchema = new mongoose.Schema({
     lastComputedAt: { type: Date, default: Date.now }
 }, { timestamps: true });
 
-// Indexes
-socialDNASchema.index({ user: 1 }, { unique: true });
+// Indexes (user already has a unique index from the field definition)
 socialDNASchema.index({ dominantVibe: 1 });
 socialDNASchema.index({ 'twins.user': 1 });
+// findTwins and the weekly job filter candidates by totalSignals
+socialDNASchema.index({ totalSignals: 1 });
 
 // =========================================================
 //  STATIC METHODS

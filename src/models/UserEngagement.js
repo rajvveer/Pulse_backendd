@@ -195,9 +195,10 @@ userEngagementSchema.statics.applyGlobalDecay = async function () {
     // Delete very stale engagements
     await this.deleteMany({ lastInteraction: { $lt: staleThreshold }, affinityScore: { $lt: 1 } });
 
-    // Recalculate remaining
-    const engagements = await this.find({});
-    for (const engagement of engagements) {
+    // Recalculate remaining — stream with a cursor instead of loading the
+    // entire collection into memory
+    const cursor = this.find({}).cursor();
+    for (let engagement = await cursor.next(); engagement != null; engagement = await cursor.next()) {
         engagement.recalculateAffinity();
         await engagement.save();
     }
