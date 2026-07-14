@@ -94,3 +94,6 @@ config/*.local.js
 # Ignore generated assets
 *.png~
 *.jpg~
+
+# native addon build output
+native/build/
