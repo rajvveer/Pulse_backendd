@@ -6,19 +6,27 @@
   "author": "Rajveer Shekhawat",
   "type": "commonjs",
   "main": "src/server.js",
+  "engines": {
+    "node": ">=20 <23"
+  },
   "scripts": {
     "start": "node src/server.js",
     "start:cluster": "node -r dotenv/config src/cluster.js",
     "dev": "nodemon --watch src --exec \"node -r dotenv/config src/server.js\"",
+    "worker": "node -r dotenv/config src/jobs/worker.js",
     "dev:worker": "nodemon --watch src src/jobs/worker.js",
-    "test": "jest --watchAll",
+    "test": "jest --ci --forceExit --passWithNoTests",
+    "test:watch": "jest --watchAll",
+    "test:ci": "jest --ci --forceExit --passWithNoTests --coverage",
     "test:unit": "jest tests/unit",
     "test:integration": "jest tests/integration",
     "lint": "eslint src --fix",
     "lint:check": "eslint src",
     "format": "prettier --write src/**/*.js",
     "seed": "node scripts/seed.js",
-    "setup": "node scripts/setup.js"
+    "setup": "node scripts/setup.js",
+    "build:native": "node-gyp rebuild --directory=native",
+    "build:native:debug": "node-gyp rebuild --debug --directory=native"
   },
   "dependencies": {
     "@sentry/node": "^10.15.0",
@@ -63,6 +71,8 @@
   "devDependencies": {
     "eslint": "^9.36.0",
     "jest": "^30.1.3",
+    "node-addon-api": "^8.8.0",
+    "node-gyp": "^10.3.1",
     "nodemon": "^3.1.10",
     "prettier": "^3.6.2",
     "supertest": "^7.1.4"
