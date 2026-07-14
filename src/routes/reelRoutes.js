@@ -2,10 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { verifyAccessToken } = require('../middlewares/auth');
 const upload = require('../middlewares/upload');
+const { uploadLimiter } = require('../middlewares/rateLimit');
 const reelController = require('../controllers/reelController');
 
-// 1. Create Reel
-router.post('/create', verifyAccessToken, upload.single('file'), reelController.createReel);
+// 1. Create Reel (video — higher per-file cap, capacity-guarded)
+router.post('/create', verifyAccessToken, uploadLimiter, upload.reelGuard, upload.videoUpload.single('file'), reelController.createReel);
 
 // 2. Get Feed (supports ?type=foryou|following)
 router.get('/feed', verifyAccessToken, reelController.getReelsFeed);

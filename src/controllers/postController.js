@@ -1,6 +1,7 @@
 const Post = require('../models/Post');
 const User = require('../models/User');
 const Comment = require('../models/Comment');
+const Follow = require('../models/Follow');
 const Like = require('../models/Like');
 const Bookmark = require('../models/Bookmark');
 const UserBehavior = require('../models/UserBehavior');
@@ -8,6 +9,8 @@ const UserEngagement = require('../models/UserEngagement');
 const Notification = require('../models/Notification');
 const DNAMatchAlgo = require('../Algorithms/DNAMatchAlgo');
 const PulseScore = require('../models/PulseScore');
+const cacheService = require('../services/cacheService');
+const feedbackService = require('../services/feedbackService');
 
 // Helper function to mask anonymous posts
 const maskAnonymousPost = (post) => {
@@ -88,9 +91,23 @@ exports.getPost = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Post not found' });
     }
 
-    // Increment view count
-    post.stats.views += 1;
-    await post.save();
+    // Enforce visibility — return 404 (not 403) to avoid confirming existence
+    const authorId = (post.author._id || post.author).toString();
+    const isOwner = authorId === req.user.userId.toString();
+    if (!isOwner) {
+      if (post.visibility === 'private') {
+        return res.status(404).json({ success: false, message: 'Post not found' });
+      }
+      if (post.visibility === 'followers') {
+        const follows = await Follow.isFollowing(req.user.userId, authorId);
+        if (!follows) {
+          return res.status(404).json({ success: false, message: 'Post not found' });
+        }
+      }
+    }
+
+    // Increment view count atomically (read-modify-write loses counts under load)
+    await Post.updateOne({ _id: postId }, { $inc: { 'stats.views': 1 } });
 
     const postObj = maskAnonymousPost(post);
 
@@ -115,10 +132,11 @@ exports.getPost = async (req, res) => {
 exports.getUserPosts = async (req, res) => {
   try {
     const { username } = req.params;
-    const { page = 1, limit = 20 } = req.query;
+    const page = Math.min(Math.max(parseInt(req.query.page) || 1, 1), 50);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 50);
     const currentUserId = req.user?.userId;
 
-    const user = await User.findOne({ username });
+    const user = await User.findOne({ username }).select('_id');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -139,17 +157,18 @@ exports.getUserPosts = async (req, res) => {
 
     const posts = await Post.find(query)
       .sort({ isPinned: -1, createdAt: -1 })
-      .limit(parseInt(limit))
-      .skip((parseInt(page) - 1) * parseInt(limit))
-      .populate('author', 'username name avatar profile isVerified');
+      .limit(limit)
+      .skip((page - 1) * limit)
+      .populate('author', 'username name avatar profile isVerified')
+      .lean();
 
     res.json({
       success: true,
       data: posts,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        hasMore: posts.length === parseInt(limit)
+        page,
+        limit,
+        hasMore: posts.length === limit
       }
     });
   } catch (error) {
@@ -161,7 +180,8 @@ exports.getUserPosts = async (req, res) => {
 // Get My Posts (For the Manage Screen)
 exports.getMyPosts = async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
+    const page = Math.min(Math.max(parseInt(req.query.page) || 1, 1), 50);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 50);
 
     // ✅ FIX: Owner can see ALL their posts including anonymous ones
     const posts = await Post.find({
@@ -170,17 +190,18 @@ exports.getMyPosts = async (req, res) => {
       // Removed isAnonymous: false - owner should see their own anonymous posts
     })
       .sort({ isPinned: -1, createdAt: -1 })
-      .limit(parseInt(limit))
-      .skip((parseInt(page) - 1) * parseInt(limit))
-      .populate('author', 'username name avatar profile isVerified');
+      .limit(limit)
+      .skip((page - 1) * limit)
+      .populate('author', 'username name avatar profile isVerified')
+      .lean();
 
     res.json({
       success: true,
       data: posts,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        hasMore: posts.length === parseInt(limit)
+        page,
+        limit,
+        hasMore: posts.length === limit
       }
     });
   } catch (error) {
@@ -203,15 +224,20 @@ exports.toggleLike = async (req, res) => {
     // Use Like model for atomic toggle (same source as feed)
     const { liked, likeCount } = await Like.toggleLike(userId, 'post', postId);
 
-    // Sync the cached stats.likes count on the post document
-    post.stats.likes = likeCount;
-    await post.save();
+    // Sync the cached stats.likes count atomically — a full document save()
+    // here would race with concurrent likes/views on the same post
+    await Post.updateOne({ _id: postId }, { $set: { 'stats.likes': likeCount } });
 
     // Track behavior for personalization (non-blocking)
     if (liked) {
       const authorId = (post.author._id || post.author).toString();
       UserBehavior.recordLike(userId, post).catch(() => { });
       UserEngagement.recordSignal(userId, authorId, 'likes', 1).catch(() => { });
+
+      // 🔁 Close the feedback loop: reinforce the user's taste vector toward
+      // this post in real time so the very next feed reflects it, and bump the
+      // post's recent-engagement velocity. Best-effort, non-blocking.
+      feedbackService.recordEngagement(userId, { item: post, contentType: 'post', action: 'like' }).catch(() => { });
 
       // 🧬 Record Social DNA signal (non-blocking)
       DNAMatchAlgo.recordInteraction(userId, post, 'like').catch(() => { });
@@ -275,8 +301,8 @@ exports.addComment = async (req, res) => {
 
     await comment.save();
 
-    post.stats.comments += 1;
-    await post.save();
+    // Atomic increment — read-modify-write loses counts under concurrency
+    await Post.updateOne({ _id: postId }, { $inc: { 'stats.comments': 1 } });
 
     if (parentCommentId) {
       await Comment.findByIdAndUpdate(parentCommentId, {
@@ -316,7 +342,9 @@ exports.addComment = async (req, res) => {
 exports.getComments = async (req, res) => {
   try {
     const { postId } = req.params;
-    const { page = 1, limit = 20, sort = 'recent' } = req.query;
+    const sort = req.query.sort || 'recent';
+    const page = Math.min(Math.max(parseInt(req.query.page) || 1, 1), 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 50);
     const userId = req.user?.userId;
 
     const comments = await Comment.find({
@@ -325,8 +353,8 @@ exports.getComments = async (req, res) => {
       isActive: true
     })
       .sort({ createdAt: -1 })
-      .limit(parseInt(limit))
-      .skip((parseInt(page) - 1) * parseInt(limit))
+      .limit(limit)
+      .skip((page - 1) * limit)
       // ✅ FIX: Added 'profile'
       .populate('author', 'username name avatar profile isVerified')
       .populate({
@@ -363,11 +391,30 @@ exports.getComments = async (req, res) => {
 
     const populatedComments = await populateNestedReplies(comments);
 
+    // Collect every comment id in the tree (top-level + nested replies) so we
+    // can resolve like counts/status from the atomic Like collection in TWO
+    // batch queries — not from the stale embedded `likes[]` arrays.
+    const ids = [];
+    const collectIds = (list) => {
+      for (const c of list) {
+        ids.push(c._id.toString());
+        if (c.replies && c.replies.length) collectIds(c.replies);
+      }
+    };
+    collectIds(populatedComments);
+
+    const [likeCounts, likedSet] = await Promise.all([
+      Like.getBatchLikeCounts('comment', ids),
+      userId ? Like.getLikedIds(userId, 'comment', ids) : Promise.resolve(new Set())
+    ]);
+
     // Add isLikedByMe flag and likesCount for each comment (including replies)
     const addLikeInfo = (commentsList) => {
       for (const comment of commentsList) {
-        comment.likesCount = comment.likes?.length || 0;
-        comment.isLikedByMe = userId ? (comment.likes || []).some(id => id.toString() === userId.toString()) : false;
+        const id = comment._id.toString();
+        comment.likesCount = likeCounts.get(id) || 0;
+        comment.isLikedByMe = likedSet.has(id);
+        delete comment.likes; // never expose the legacy embedded array
         if (comment.replies && comment.replies.length > 0) {
           addLikeInfo(comment.replies);
         }
@@ -383,10 +430,7 @@ exports.getComments = async (req, res) => {
     res.json({
       success: true,
       data: populatedComments,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit)
-      }
+      pagination: { page, limit }
     });
   } catch (error) {
     console.error('Get comments error:', error.message);
@@ -394,31 +438,27 @@ exports.getComments = async (req, res) => {
   }
 };
 
-// Toggle like on a comment
+// Toggle like on a comment — uses the atomic Like collection (same as posts /
+// reels) instead of a read-modify-write on an embedded `likes[]` array. The
+// old approach lost updates under concurrent likes (two requests read the same
+// array, each writes its own version) and rewrote the whole document — making
+// popular comments the most expensive things to like. Like.toggleLike is a
+// single atomic delete-or-insert.
 exports.toggleCommentLike = async (req, res) => {
   try {
     const { commentId } = req.params;
     const userId = req.user.userId;
 
-    const comment = await Comment.findById(commentId);
+    const comment = await Comment.findById(commentId).select('_id').lean();
     if (!comment) {
       return res.status(404).json({ success: false, message: 'Comment not found' });
     }
 
-    const likeIndex = comment.likes.findIndex(id => id.toString() === userId.toString());
-    if (likeIndex === -1) {
-      comment.likes.push(userId);
-    } else {
-      comment.likes.splice(likeIndex, 1);
-    }
-    await comment.save();
+    const { liked, likeCount } = await Like.toggleLike(userId, 'comment', commentId);
 
     res.json({
       success: true,
-      data: {
-        isLiked: likeIndex === -1,
-        likesCount: comment.likes.length
-      }
+      data: { isLiked: liked, likesCount: likeCount }
     });
   } catch (error) {
     console.error('Toggle comment like error:', error.message);
@@ -513,21 +553,26 @@ exports.searchPosts = async (req, res) => {
       return res.json({ success: true, data: [] });
     }
 
-    const searchQuery = q.trim();
+    const searchQuery = q.trim().slice(0, 100);
+    const pageNum = Math.min(Math.max(parseInt(page) || 1, 1), 20);
+    const limitNum = Math.min(Math.max(parseInt(limit) || 20, 1), 50);
 
-    // Search by text content or hashtags
-    const posts = await Post.find({
-      isActive: true,
-      isAnonymous: false,
-      visibility: 'public',
-      $or: [
-        { 'content.text': { $regex: searchQuery, $options: 'i' } },
-        { 'content.hashtags': { $regex: searchQuery.replace('#', ''), $options: 'i' } }
-      ]
-    })
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit))
-      .skip((parseInt(page) - 1) * parseInt(limit))
+    // Use the MongoDB full-text index ($text) instead of a case-insensitive
+    // $regex, which cannot use any index and forces a full collection scan
+    // (catastrophic at scale, and a ReDoS/cost vector). $text is index-backed
+    // and ranks by relevance.
+    const posts = await Post.find(
+      {
+        $text: { $search: searchQuery },
+        isActive: true,
+        isAnonymous: false,
+        visibility: 'public'
+      },
+      { score: { $meta: 'textScore' } }
+    )
+      .sort({ score: { $meta: 'textScore' } })
+      .limit(limitNum)
+      .skip((pageNum - 1) * limitNum)
       .populate('author', 'username name avatar profile isVerified')
       .lean();
 
@@ -535,9 +580,9 @@ exports.searchPosts = async (req, res) => {
       success: true,
       data: posts,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        hasMore: posts.length === parseInt(limit)
+        page: pageNum,
+        limit: limitNum,
+        hasMore: posts.length === limitNum
       }
     });
   } catch (error) {
@@ -551,22 +596,34 @@ exports.searchPosts = async (req, res) => {
 // ==========================================
 exports.getTrendingHashtags = async (req, res) => {
   try {
-    const timeAgo = new Date(Date.now() - 24 * 60 * 60 * 1000); // Last 24 hours
+    // Served from Redis. The expensive $unwind + $group aggregation over the
+    // last 24h of posts is run on an interval by the background scheduler
+    // (jobs/scheduler.js → trending-hashtags) and cached, NOT recomputed on
+    // every request. getOrSet single-flights the recompute on a cache miss so
+    // a cold cache under load triggers exactly one aggregation, not thousands.
+    const data = await cacheService.getOrSet(
+      'trending:hashtags',
+      () => computeTrendingHashtags(),
+      parseInt(process.env.TRENDING_HASHTAG_TTL_SEC) || 600 // 10 min
+    );
 
-    const trending = await Post.aggregate([
-      { $match: { isActive: true, visibility: 'public', createdAt: { $gte: timeAgo } } },
-      { $unwind: '$content.hashtags' },
-      { $group: { _id: '$content.hashtags', count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-      { $limit: 10 }
-    ]);
-
-    res.json({
-      success: true,
-      data: trending.map(t => ({ tag: t._id, count: t.count }))
-    });
+    res.json({ success: true, data });
   } catch (error) {
     console.error('Get trending error:', error.message);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: 'Failed to load trending' });
   }
 };
+
+// Exported so the background scheduler can refresh the cache proactively.
+async function computeTrendingHashtags() {
+  const timeAgo = new Date(Date.now() - 24 * 60 * 60 * 1000); // Last 24 hours
+  const trending = await Post.aggregate([
+    { $match: { isActive: true, visibility: 'public', createdAt: { $gte: timeAgo } } },
+    { $unwind: '$content.hashtags' },
+    { $group: { _id: '$content.hashtags', count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
+    { $limit: 10 }
+  ]);
+  return trending.map(t => ({ tag: t._id, count: t.count }));
+}
+exports.computeTrendingHashtags = computeTrendingHashtags;

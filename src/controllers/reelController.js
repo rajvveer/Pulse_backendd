@@ -1,20 +1,39 @@
 const Reel = require('../models/Reel');
 const ReelComment = require('../models/ReelComment');
 const Like = require('../models/Like');
-const User = require('../models/User');
+const Follow = require('../models/Follow');
+const Post = require('../models/Post');
+const SocialDNA = require('../models/SocialDNA');
+const UserBehavior = require('../models/UserBehavior');
 const UserEngagement = require('../models/UserEngagement');
 const ReelAlgo = require('../Algorithms/ReelAlgo');
 const CommentsAlgo = require('../Algorithms/CommentsAlgo');
 const Notification = require('../models/Notification');
+const cacheService = require('../services/cacheService');
+const embeddingService = require('../services/embeddingService');
+const userVectorService = require('../services/userVectorService');
 const cloudinary = require('cloudinary').v2;
 const { Readable } = require('stream');
 const config = require('../config');
+
+const REEL_CANDIDATE_TTL = parseInt(process.env.REEL_CANDIDATE_TTL_SEC) || 30;
+// Models bundle for userVectorService (taste vector is cross-content).
+const VECTOR_DEPS = { Like, Post, SocialDNA, UserBehavior };
 
 cloudinary.config({
   cloud_name: config.get('media.cloudinary.cloudName'),
   api_key: config.get('media.cloudinary.apiKey'),
   api_secret: config.get('media.cloudinary.apiSecret')
 });
+
+// Cached following-ids lookup (shared key with feedController's follow graph
+// is avoided to keep shapes simple; this is the reel-specific list cache).
+const getCachedFollowing = (userId) =>
+  cacheService.getOrSet(
+    `reel:following:${userId}`,
+    async () => (await Follow.getFollowingIds(userId)).map(String),
+    parseInt(process.env.FOLLOW_GRAPH_TTL_SEC) || 60
+  );
 
 // ✅ HELPER: Optimize Cloudinary URL
 const getOptimizedVideoUrl = (url) => {
@@ -125,38 +144,29 @@ exports.getReelsFeed = async (req, res) => {
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
 
-  console.log('\n🎬 [getReelsFeed] Starting...');
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
+    const page = Math.min(Math.max(parseInt(req.query.page) || 1, 1), 50);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 50);
     const feedType = req.query.type || 'foryou';
     const userId = req.user ? req.user.userId : null;
 
-    console.log('🎬 [getReelsFeed] Params:', { page, limit, feedType, userId });
-
-    // Fetch more reels than needed for ranking
-    const fetchLimit = Math.min(limit * 5, 100);
-
-    const reels = await Reel.find()
-      .sort({ createdAt: -1 })
-      .limit(fetchLimit)
-      .populate({
-        path: 'user',
-        select: '+authMethods username profile avatar isVerified stats'
-      })
-      .lean();
-
-    console.log('🎬 [getReelsFeed] Fetched reels from DB:', reels.length);
-    if (reels.length > 0) {
-      console.log('🎬 [getReelsFeed] First reel sample:', {
-        id: reels[0]._id,
-        hasUser: !!reels[0].user,
-        hasVideoUrl: !!reels[0].videoUrl
-      });
-    }
+    // Shared candidate set: the newest reels are identical for every user, so
+    // fetch them ONCE per interval via Redis (single-flight) instead of a fresh
+    // DB scan on every request. Per-user ranking is applied afterward.
+    const reels = await cacheService.getOrSet(
+      'reel:candidate:foryou',
+      async () => Reel.find({ isActive: { $ne: false } })
+        .sort({ createdAt: -1 })
+        .limit(100)
+        .populate({
+          path: 'user',
+          select: '+authMethods username profile avatar isVerified stats'
+        })
+        .lean(),
+      REEL_CANDIDATE_TTL
+    );
 
     if (!reels || reels.length === 0) {
-      console.log('🎬 [getReelsFeed] No reels found, returning empty');
       return res.status(200).json({
         success: true,
         data: [],
@@ -164,76 +174,83 @@ exports.getReelsFeed = async (req, res) => {
       });
     }
 
-    // Get user's following list for personalization
+    // Following list from the indexed Follow collection (the legacy embedded
+    // User.following array is being phased out and is unbounded).
     let followingIds = [];
     if (userId) {
       try {
-        const user = await User.findById(userId).select('following').lean();
-        followingIds = user?.following || [];
-        console.log('🎬 [getReelsFeed] Following count:', followingIds.length);
+        followingIds = await getCachedFollowing(userId);
       } catch (e) {
         console.warn('Could not get following:', e.message);
       }
     }
 
-    // Get like status in batch (O(1) per item) - with fallback
+    // Per-user "did I like these?" set only. Counts come from the maintained
+    // reel.stats.likes / likesCount — we do NOT re-aggregate the Like
+    // collection on every feed render.
     const reelIds = reels.map(r => r._id.toString());
     let likedSet = new Set();
-    let likeCounts = new Map();
-
     try {
       likedSet = userId
         ? await Like.getLikedIds(userId, 'reel', reelIds)
         : new Set();
-      likeCounts = await Like.getBatchLikeCounts('reel', reelIds);
-      console.log('🎬 [getReelsFeed] Like data fetched');
     } catch (e) {
-      console.warn('Like batch fetch failed, using fallback:', e.message);
-      reelIds.forEach(id => likeCounts.set(id, 0));
+      console.warn('Like lookup failed:', e.message);
+    }
+
+    // ── Personalized candidate generation (For-You only) ──
+    // Re-order the candidate pool by cosine similarity to the user's taste
+    // vector BEFORE ranking, so the ranker sees the most relevant reels first.
+    // Best-effort: any failure leaves the recency pool untouched.
+    let candidateReels = reels;
+    if (feedType !== 'following' && userId) {
+      try {
+        const userVec = await userVectorService.getUserVector(userId, VECTOR_DEPS);
+        if (userVec) {
+          candidateReels = [...reels]
+            .map(r => ({ r, s: embeddingService.cosine(userVec, embeddingService.reelVector(r)) }))
+            .sort((a, b) => b.s - a.s)
+            .map(x => x.r);
+        }
+      } catch (e) {
+        console.warn('[reels] retrieval failed, using recency pool:', e.message);
+      }
     }
 
     // Apply ranking algorithm with fallback
     let rankedReels;
     try {
-      console.log('🎬 [getReelsFeed] Calling algorithm...');
       if (feedType === 'following') {
         rankedReels = await ReelAlgo.getFollowingFeed(userId, reels, followingIds);
       } else {
-        rankedReels = await ReelAlgo.getForYouFeed(userId, reels, { followingIds });
+        rankedReels = await ReelAlgo.getForYouFeed(userId, candidateReels, { followingIds });
       }
-      console.log('🎬 [getReelsFeed] Algorithm returned:', rankedReels?.length || 0, 'reels');
     } catch (algoError) {
       console.error('❌ [getReelsFeed] Ranking algorithm failed:', algoError.message);
-      console.error(algoError.stack);
-      // Fallback to chronological order
-      rankedReels = reels;
+      rankedReels = reels; // Fallback to chronological order
     }
 
-    // Safety check
     if (!rankedReels || rankedReels.length === 0) {
-      console.log('🎬 [getReelsFeed] Algorithm returned empty, using original reels');
       rankedReels = reels;
     }
 
     // Paginate after ranking
     const startIndex = (page - 1) * limit;
     const paginatedReels = rankedReels.slice(startIndex, startIndex + limit);
-    console.log('🎬 [getReelsFeed] After pagination:', paginatedReels.length, 'reels');
 
-    // Process for response
+    // Process for response. Like count comes from the maintained counter
+    // (stats.likes / likesCount), not a per-request aggregation.
     const processedReels = paginatedReels.map(reel => ({
       ...reel,
       videoUrl: getOptimizedVideoUrl(reel.videoUrl),
       isLiked: likedSet.has(reel._id.toString()),
-      likesCount: likeCounts.get(reel._id.toString()) || reel.likes?.length || 0,
+      likesCount: reel.stats?.likes ?? reel.likesCount ?? 0,
       user: normalizeUser(reel.user),
       // Remove internal scoring fields
       _score: undefined,
       _personalBoost: undefined,
       isDiversity: undefined
     }));
-
-    console.log('🎬 [getReelsFeed] Final response:', processedReels.length, 'reels');
 
     res.status(200).json({
       success: true,
@@ -302,13 +319,43 @@ exports.trackView = async (req, res) => {
     const { watchTimeSeconds, watchPercentage } = req.body;
     const userId = req.user?.userId;
 
-    const reel = await Reel.findById(reelId);
+    const reel = await Reel.findById(reelId).select('user');
     if (!reel) return res.status(404).json({ success: false, message: 'Reel not found' });
 
-    // Update view stats
-    await Reel.findByIdAndUpdate(reelId, {
-      $inc: { 'stats.views': 1 }
-    });
+    // Normalize the client's watch percentage to the 0..1 fraction that
+    // ReelAlgo's completion thresholds expect (accept either 0..1 or 0..100).
+    let frac = null;
+    if (watchPercentage !== undefined && watchPercentage !== null) {
+      const n = Number(watchPercentage);
+      if (!Number.isNaN(n)) frac = Math.max(0, Math.min(1, n > 1 ? n / 100 : n));
+    }
+
+    // Atomically bump views AND maintain a running average watch completion.
+    // newAvg = (oldAvg * oldViews + frac) / (oldViews + 1) — computed in an
+    // aggregation-pipeline update so it's correct under concurrent views and
+    // never re-reads then writes. avgWatchPercentage was previously NEVER
+    // written, so ReelAlgo's heaviest signal (completion) was dead at 0.
+    const inc = { $inc: { 'stats.views': 1 } };
+    if (frac !== null) {
+      await Reel.updateOne({ _id: reelId }, [
+        {
+          $set: {
+            'stats.avgWatchPercentage': {
+              $let: {
+                vars: {
+                  v: { $ifNull: ['$stats.views', 0] },
+                  a: { $ifNull: ['$stats.avgWatchPercentage', 0] },
+                },
+                in: { $divide: [{ $add: [{ $multiply: ['$$a', '$$v'] }, frac] }, { $add: ['$$v', 1] }] },
+              },
+            },
+            'stats.views': { $add: [{ $ifNull: ['$stats.views', 0] }, 1] },
+          },
+        },
+      ]);
+    } else {
+      await Reel.updateOne({ _id: reelId }, inc);
+    }
 
     // Track engagement for personalization
     if (userId && reel.user) {
@@ -380,15 +427,23 @@ exports.getComments = async (req, res) => {
   try {
     const { reelId } = req.params;
     const sortMode = req.query.sort || 'best'; // 'best' | 'top' | 'new'
+    // Paginate + cap. Without a limit, a viral reel loaded ALL top-level
+    // comments (plus populated replies) and ran dozens of regexes each through
+    // CommentsAlgo synchronously on the event loop. Bound it.
+    const page = Math.min(Math.max(parseInt(req.query.page) || 1, 1), 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 30, 1), 50);
 
     const comments = await ReelComment.find({ reel: reelId, parentComment: null })
       .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
       .populate({
         path: 'author',
         select: 'username profile avatar isVerified'
       })
       .populate({
         path: 'replies',
+        options: { sort: { createdAt: 1 }, limit: 30 },
         populate: {
           path: 'author',
           select: 'username profile avatar isVerified'
@@ -419,14 +474,6 @@ exports.getComments = async (req, res) => {
       _score: undefined
     }));
 
-    // 🔍 DEBUG: Log avatar data for first few comments
-    if (processedComments.length > 0) {
-      console.log('📸 [getComments] Sample comment avatars:');
-      processedComments.slice(0, 3).forEach((c, idx) => {
-        console.log(`  Comment ${idx + 1}: author=${c.author?.username}, avatar=${c.author?.avatar?.substring(0, 50)}...`);
-      });
-    }
-
     res.status(200).json({ success: true, data: processedComments });
 
   } catch (error) {
@@ -443,23 +490,16 @@ exports.toggleCommentLike = async (req, res) => {
     const { commentId } = req.params;
     const userId = req.user.userId;
 
-    const comment = await ReelComment.findById(commentId);
+    const comment = await ReelComment.findById(commentId).select('_id').lean();
     if (!comment) return res.status(404).json({ success: false, message: 'Comment not found' });
 
-    const likeIndex = comment.likes.indexOf(userId);
-    if (likeIndex === -1) {
-      comment.likes.push(userId);
-    } else {
-      comment.likes.splice(likeIndex, 1);
-    }
-    await comment.save();
+    // Atomic toggle via the Like collection (targetType 'comment') — avoids the
+    // read-modify-write lost-update race on the embedded `likes[]` array.
+    const { liked, likeCount } = await Like.toggleLike(userId, 'comment', commentId);
 
     res.status(200).json({
       success: true,
-      data: {
-        isLiked: likeIndex === -1,
-        likesCount: comment.likes.length
-      }
+      data: { isLiked: liked, likesCount: likeCount }
     });
 
   } catch (error) {
