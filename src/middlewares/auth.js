@@ -1,6 +1,46 @@
+const crypto = require('crypto');
 const jwtService = require('../services/jwtService');
 const User = require('../models/User');
 const cacheService = require('../services/cacheService');
+
+const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
+
+// Single-flight map: when the auth-user cache misses for a userId, only ONE
+// DB lookup runs per process; concurrent requests for the same user await it.
+// Prevents a fleet-wide Redis blip from turning every in-flight request into a
+// separate User.findById against the connection pool (a stampede).
+const _authInflight = new Map();
+
+async function resolveUserActive(userId) {
+  const cacheKey = `auth_user:${userId}`;
+
+  // Try cache first.
+  try {
+    const cached = await cacheService.get(cacheKey);
+    if (cached !== null) return cached === 'true' || cached === true;
+  } catch { /* Redis down — fall through to DB */ }
+
+  // Coalesce concurrent misses for this user.
+  if (_authInflight.has(userId)) return _authInflight.get(userId);
+
+  const promise = (async () => {
+    const user = await User.findById(userId).select('isActive').lean();
+    const active = !!(user && user.isActive);
+    try {
+      // 5 min ± jitter so a batch of logins doesn't expire in lockstep.
+      const ttl = 300 + Math.floor(Math.random() * 60);
+      await cacheService.set(cacheKey, String(active), ttl);
+    } catch { /* Redis down — continue without caching */ }
+    return active;
+  })();
+
+  _authInflight.set(userId, promise);
+  try {
+    return await promise;
+  } finally {
+    _authInflight.delete(userId);
+  }
+}
 
 class AuthMiddleware {
   // Verify access token middleware
@@ -20,32 +60,23 @@ class AuthMiddleware {
       
       // Verify token
       const decoded = jwtService.verifyAccessToken(token);
-      
-      // Check user exists — use Redis cache to avoid DB hit on every request
-      const cacheKey = `auth_user:${decoded.userId}`;
-      let userActive = null;
 
+      // Reject tokens revoked by logout (denylist entries expire with the token)
       try {
-        const cached = await cacheService.get(cacheKey);
-        if (cached !== null) {
-          userActive = cached === 'true' || cached === true;
+        const revoked = await cacheService.get(`revoked_token:${hashToken(token)}`);
+        if (revoked) {
+          return res.status(401).json({
+            success: false,
+            error: 'Access token revoked',
+            code: 'TOKEN_REVOKED'
+          });
         }
       } catch (cacheErr) {
-        // Redis down — fall through to DB
+        // Redis down — fail open for availability; tokens still expire in 15m
       }
 
-      if (userActive === null) {
-        // Cache miss — check database
-        const user = await User.findById(decoded.userId).select('isActive').lean();
-        userActive = !!(user && user.isActive);
-        
-        // Cache the result for 5 minutes
-        try {
-          await cacheService.set(cacheKey, String(userActive), 300);
-        } catch (cacheErr) {
-          // Redis down — continue without caching
-        }
-      }
+      // Check user exists/active — cached, single-flighted, jittered TTL.
+      const userActive = await resolveUserActive(decoded.userId);
 
       if (!userActive) {
         return res.status(401).json({
